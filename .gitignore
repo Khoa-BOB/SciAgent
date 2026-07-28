@@ -1,0 +1,134 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# macOS / Windows
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Data
+# =========================
+data/
+datasets/
+downloads/
+raw_data/
+processed_data/
+
+# Large data files
+*.csv
+*.tsv
+*.jsonl
+*.parquet
+*.feather
+*.h5
+*.h5ad
+*.npz
+*.npy
+*.zip
+*.tar
+*.gz
+*.bz2
+*.xz
+
+# =========================
+# Models
+# =========================
+models/
+checkpoints/
+weights/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# =========================
+# Caches
+# =========================
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Hugging Face
+.huggingface/
+hf_cache/
+
+# =========================
+# Ollama
+# =========================
+ollama.log
+
+# =========================
+# Neo4j
+# =========================
+neo4j/data/
+neo4j/logs/
+neo4j/plugins/
+neo4j/import/
+
+# =========================
+# Output
+# =========================
+outputs/
+results/
+artifacts/
+tmp/
+temp/
+
+# =========================
+# Coverage
+# =========================
+.coverage
+coverage.xml
+htmlcov/
+
+# =========================
+# Testing
+# =========================
+.pytest_cache/
