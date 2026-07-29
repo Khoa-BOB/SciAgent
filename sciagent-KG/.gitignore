@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Environment variables
+.env
+
+# Data
+data/*.jsonl
+data/*.json
+data/*.csv
+
+# Keep small example files
+!data/sample.jsonl
+
+# Neo4j
+neo4j_data/
+neo4j_logs/
+neo4j_import/
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
