@@ -35,19 +35,27 @@ class PaperVectorSearch:
     def close(self) -> None:
         self.driver.close()
 
+    def embed_query(self, query: str) -> list[float]:
+        if not query.strip():
+            raise ValueError("Query cannot be empty")
+
+        return self.model.encode(
+            query,
+            normalize_embeddings=True,
+        ).tolist()
+
     def search(
         self,
         query: str,
         top_k: int = 5,
     ) -> list[SearchResult]:
-        if not query.strip():
-            raise ValueError("Query cannot be empty")
+        return self.search_by_embedding(self.embed_query(query), top_k=top_k)
 
-        query_embedding = self.model.encode(
-            query,
-            normalize_embeddings=True,
-        ).tolist()
-
+    def search_by_embedding(
+        self,
+        query_embedding: list[float],
+        top_k: int = 5,
+    ) -> list[SearchResult]:
         records, _, _ = self.driver.execute_query(
             """
             CALL db.index.vector.queryNodes(
