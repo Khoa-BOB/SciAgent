@@ -480,6 +480,10 @@ CREATE INDEX paper_update_date IF NOT EXISTS
 FOR (p:Paper)
 ON (p.update_date);
 
+CREATE INDEX paper_first_submitted_at IF NOT EXISTS
+FOR (p:Paper)
+ON (p.first_submitted_at);
+
 CREATE INDEX author_normalized_name IF NOT EXISTS
 FOR (a:Author)
 ON (a.normalized_name);

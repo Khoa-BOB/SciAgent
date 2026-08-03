@@ -23,6 +23,9 @@ neo4j_import/
 # Ingestion checkpoints
 .checkpoints/
 
+# Generated eval data (regenerate with: uv run python -m src.evaluation.cli generate)
+eval/self_retrieval.jsonl
+
 # IDE
 .vscode/
 .idea/

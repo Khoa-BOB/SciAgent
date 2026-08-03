@@ -1,9 +1,10 @@
 import hashlib
 import re
-import unicodedata
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+
+from src.text_utils import normalize_name
 
 
 def _clean_text(value: Any) -> str | None:
@@ -12,13 +13,6 @@ def _clean_text(value: Any) -> str | None:
         return None
     cleaned = str(value).strip()
     return cleaned or None
-
-
-def _normalized_name(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value).casefold()
-    return " ".join(
-        re.sub(r"[^\w\s-]", "", normalized, flags=re.UNICODE).split()
-    )
 
 
 def _stable_id(prefix: str, value: str) -> str:
@@ -61,7 +55,7 @@ def transform(record: dict[str, Any]) -> dict[str, Any]:
         display_name = " ".join(
             part for part in (given_names, family_name, suffix) if part
         )
-        normalized_name = _normalized_name(display_name)
+        normalized_name = normalize_name(display_name)
         authors.append(
             {
                 # The source has no ORCID/author key; this deterministic name-based
@@ -98,7 +92,7 @@ def transform(record: dict[str, Any]) -> dict[str, Any]:
     submitter_name = _clean_text(record.get("submitter"))
     submitter = None
     if submitter_name:
-        normalized_submitter = _normalized_name(submitter_name)
+        normalized_submitter = normalize_name(submitter_name)
         submitter = {
             "submitter_id": _stable_id("submitter", normalized_submitter),
             "name": submitter_name,
@@ -108,7 +102,7 @@ def transform(record: dict[str, Any]) -> dict[str, Any]:
     journal_reference = _clean_text(record.get("journal-ref"))
     journal = None
     if journal_reference:
-        normalized_journal = _normalized_name(journal_reference)
+        normalized_journal = normalize_name(journal_reference)
         journal = {
             "journal_id": _stable_id("journal", normalized_journal),
             "name": journal_reference,
