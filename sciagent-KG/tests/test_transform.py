@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from src.transform import transform
+from src.ingestion.transform import transform
 
 
 SAMPLE = Path(__file__).parents[2] / "data/example/example.jsonl"

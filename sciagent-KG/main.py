@@ -1,6 +1,4 @@
-def main():
-    print("Hello from sciagent-kg!")
-
+from src.ingestion.cli import main
 
 if __name__ == "__main__":
     main()

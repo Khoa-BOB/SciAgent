@@ -1,10 +1,7 @@
-import os
 from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
-
 from queries.expansion import RELATED_BY_AUTHOR, RELATED_BY_CATEGORY, SEED_CONTEXT
+from src.config import NEO4J_DATABASE, get_driver
 
 DEFAULT_RELATED_LIMIT = 5
 DEFAULT_POOL_SIZE = 20
@@ -38,16 +35,8 @@ class ExpandedResult:
 
 class GraphExpander:
     def __init__(self) -> None:
-        load_dotenv()
-
-        self.database = os.getenv("NEO4J_DATABASE", "neo4j")
-        self.driver = GraphDatabase.driver(
-            os.environ["NEO4J_URI"],
-            auth=(
-                os.environ["NEO4J_USERNAME"],
-                os.environ["NEO4J_PASSWORD"],
-            ),
-        )
+        self.database = NEO4J_DATABASE
+        self.driver = get_driver()
 
     def close(self) -> None:
         self.driver.close()

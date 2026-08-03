@@ -1,25 +1,20 @@
-import os
+from neo4j import Driver
 
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
-
-load_dotenv()
+from src.config import NEO4J_DATABASE, get_driver
 
 
-uri = os.getenv("NEO4J_URI")
-username = os.getenv("NEO4J_USERNAME")
-password = os.getenv("NEO4J_PASSWORD")
-database = os.getenv("NEO4J_DATABASE")
-
-driver = GraphDatabase.driver(uri, auth=(username, password))
-
-def check_connection():
+def check_connection(driver: Driver, database: str | None = NEO4J_DATABASE) -> bool:
     with driver.session(database=database) as session:
         result = session.run("RETURN 1")
         return result.single()[0] == 1
 
+
 if __name__ == "__main__":
-    if check_connection():
-        print("Connection successful")
-    else:
-        print("Connection failed")
+    driver = get_driver()
+    try:
+        if check_connection(driver):
+            print("Connection successful")
+        else:
+            print("Connection failed")
+    finally:
+        driver.close()

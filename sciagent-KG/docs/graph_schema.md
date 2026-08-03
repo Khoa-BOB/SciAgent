@@ -289,7 +289,7 @@ No relationship properties required.
 | Relationship | Source | Target |
 |--------------|--------|--------|
 | AUTHORED | One author → Many papers | One paper → One or more authors |
-| SUBMITTED | One submitter → Many papers | One paper → One submitter |
+| SUBMITTED | One submitter → Many papers | One paper → Zero or one submitter |
 | HAS_VERSION | One paper → Many versions | One version → One paper |
 | IN_CATEGORY | One paper → Many categories | One category → Many papers |
 | PUBLISHED_IN | One paper → Zero or one journal | One journal → Many papers |
@@ -402,7 +402,7 @@ update_date
 
 ### SUBMITTED
 
-- Each paper has exactly one submitter.
+- A paper has at most one submitter (some source records omit the submitter field entirely).
 
 ### HAS_VERSION
 

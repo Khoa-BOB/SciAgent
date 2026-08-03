@@ -1,12 +1,11 @@
-import os
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
 from sentence_transformers import SentenceTransformer
 
+from src.config import NEO4J_DATABASE, get_driver
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+MODEL_NAME = "google/embeddinggemma-300m"
 INDEX_NAME = "paper_embedding_index"
 
 
@@ -20,16 +19,8 @@ class SearchResult:
 
 class PaperVectorSearch:
     def __init__(self) -> None:
-        load_dotenv()
-
-        self.database = os.getenv("NEO4J_DATABASE", "neo4j")
-        self.driver = GraphDatabase.driver(
-            os.environ["NEO4J_URI"],
-            auth=(
-                os.environ["NEO4J_USERNAME"],
-                os.environ["NEO4J_PASSWORD"],
-            ),
-        )
+        self.database = NEO4J_DATABASE
+        self.driver = get_driver()
         self.model = SentenceTransformer(MODEL_NAME)
 
     def close(self) -> None:
@@ -42,6 +33,7 @@ class PaperVectorSearch:
         return self.model.encode(
             query,
             normalize_embeddings=True,
+            prompt_name="query",
         ).tolist()
 
     def search(
