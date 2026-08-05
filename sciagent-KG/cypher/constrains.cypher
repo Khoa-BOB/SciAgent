@@ -25,3 +25,15 @@ REQUIRE j.journal_id IS UNIQUE;
 CREATE CONSTRAINT report_number IF NOT EXISTS
 FOR (r:TechnicalReport)
 REQUIRE r.report_number IS UNIQUE;
+
+CREATE CONSTRAINT method_name IF NOT EXISTS
+FOR (m:Method)
+REQUIRE m.normalized_name IS UNIQUE;
+
+CREATE CONSTRAINT dataset_name IF NOT EXISTS
+FOR (d:Dataset)
+REQUIRE d.normalized_name IS UNIQUE;
+
+CREATE CONSTRAINT topic_name IF NOT EXISTS
+FOR (t:ResearchTopic)
+REQUIRE t.normalized_name IS UNIQUE;

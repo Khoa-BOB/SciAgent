@@ -1,0 +1,19 @@
+services:
+  neo4j-bench:
+    image: neo4j:latest
+    container_name: neo4j-bench
+    ports:
+      - "7475:7474"
+      - "7688:7687"
+    volumes:
+      - neo4j_bench_data:/data
+      - neo4j_bench_logs:/logs
+      - neo4j_bench_import:/import
+    environment:
+      NEO4J_AUTH: neo4j/myStrongPassword123
+    restart: "no"
+
+volumes:
+  neo4j_bench_data:
+  neo4j_bench_logs:
+  neo4j_bench_import:

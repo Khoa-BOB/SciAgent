@@ -34,6 +34,72 @@ def save_eval_queries(queries: Iterable[EvalQuery], path: Path) -> None:
             eval_file.write(json.dumps(asdict(query)) + "\n")
 
 
+def get_corpus_size(driver: Driver, database: str | None) -> int:
+    records, _, _ = driver.execute_query(
+        "MATCH (p:Paper) RETURN count(p) AS c",
+        database_=database,
+        routing_="r",
+    )
+    return records[0]["c"]
+
+
+@dataclass
+class ExpansionCase:
+    seed_id: str
+    seed_embedding: list[float]
+    expected_id: str
+    source: str
+
+
+_EXPANSION_QUERIES: dict[str, str] = {
+    # For each author/category with >=2 embedded papers, take the first two
+    # (by arxiv_id, for determinism) as a (seed, expected) pair. `expected`
+    # is guaranteed connected to `seed` by that relation, so this checks
+    # whether GraphExpander actually surfaces known-connected papers -- not
+    # full topical relevance, which we have no ground truth for.
+    "shared_author": """
+        MATCH (a:Author)-[:AUTHORED]->(p:Paper)
+        WHERE p.embedding IS NOT NULL
+        WITH a, p ORDER BY p.arxiv_id
+        WITH a, collect({id: p.arxiv_id, embedding: p.embedding}) AS papers
+        WHERE size(papers) >= 2
+        RETURN papers[0].id AS seed_id, papers[0].embedding AS seed_embedding,
+               papers[1].id AS expected_id
+        LIMIT $limit
+    """,
+    "shared_category": """
+        MATCH (c:Category)<-[:IN_CATEGORY]-(p:Paper)
+        WHERE p.embedding IS NOT NULL
+        WITH c, p ORDER BY p.arxiv_id
+        WITH c, collect({id: p.arxiv_id, embedding: p.embedding}) AS papers
+        WHERE size(papers) >= 2
+        RETURN papers[0].id AS seed_id, papers[0].embedding AS seed_embedding,
+               papers[1].id AS expected_id
+        LIMIT $limit
+    """,
+}
+
+
+def generate_expansion_cases(
+    driver: Driver, database: str | None, source: str, limit: int = 500
+) -> list[ExpansionCase]:
+    records, _, _ = driver.execute_query(
+        _EXPANSION_QUERIES[source],
+        limit=limit,
+        database_=database,
+        routing_="r",
+    )
+    return [
+        ExpansionCase(
+            seed_id=record["seed_id"],
+            seed_embedding=record["seed_embedding"],
+            expected_id=record["expected_id"],
+            source=source,
+        )
+        for record in records
+    ]
+
+
 def generate_self_retrieval_queries(
     driver: Driver, database: str | None
 ) -> list[EvalQuery]:
