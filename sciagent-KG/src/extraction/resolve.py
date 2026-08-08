@@ -64,8 +64,15 @@ def cluster_names(
     """Greedy nearest-cluster merge: names are processed most-frequent-first
     (so common phrasing claims the canonical slot), and each subsequent name
     joins the most similar existing cluster if cosine similarity clears
-    `threshold`, else starts a new one. O(n * clusters) -- fine at the scale
-    of unique entity names (hundreds to low thousands), not paper count.
+    `threshold`, else starts a new one. O(n * clusters) comparisons -- at
+    tens of thousands of unique names (real corpus scale, not the "hundreds
+    to low thousands" this was first written for), clusters grows close to
+    n since most names don't clear the threshold, making this effectively
+    O(n^2). Embeddings are written into one preallocated array and compared
+    via a sliced matmul (BLAS-backed) instead of calling np.vstack fresh
+    per name -- that earlier version re-copied the entire growing array on
+    every single iteration, which is what actually made this untenable at
+    scale (a redundant O(n) copy on top of the O(n) comparison, per name).
     """
     if not names:
         return {}
@@ -73,19 +80,21 @@ def cluster_names(
     embeddings = model.encode(names, normalize_embeddings=True, show_progress_bar=False)
 
     canonical_names: list[str] = []
-    canonical_embeddings: list[np.ndarray] = []
+    canonical_embeddings = np.empty_like(embeddings)
     mapping: dict[str, str] = {}
+    cluster_count = 0
 
     for name, embedding in zip(names, embeddings):
-        if canonical_embeddings:
-            similarities = np.dot(np.vstack(canonical_embeddings), embedding)
+        if cluster_count:
+            similarities = canonical_embeddings[:cluster_count] @ embedding
             best_index = int(np.argmax(similarities))
             if similarities[best_index] >= threshold:
                 mapping[name] = canonical_names[best_index]
                 continue
 
         canonical_names.append(name)
-        canonical_embeddings.append(embedding)
+        canonical_embeddings[cluster_count] = embedding
+        cluster_count += 1
         mapping[name] = name
 
     return mapping
@@ -121,6 +130,13 @@ def resolve(shards_dir: Path, threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -
                     "entity_type": entity_type,
                     "name": canonical,
                     "normalized_name": _normalize(canonical),
+                    # The pre-clustering name exactly as the LLM wrote it,
+                    # kept even when a merge made it differ from `canonical`
+                    # -- otherwise that mapping only ever exists in memory
+                    # during this one run. Carried through to the relationship
+                    # itself in merge.py so it survives in Neo4j independent
+                    # of the *.extracted.jsonl source files.
+                    "raw_name": mention.name,
                     "extraction_model": mention.extraction_model,
                     "extracted_at": mention.extracted_at,
                 }

@@ -38,7 +38,8 @@ def upsert_relations_query(entity_type: str) -> str:
         MERGE (p)-[r:{relation}]->(e)
         SET r.confidence = row.confidence,
             r.extraction_model = row.extraction_model,
-            r.extracted_at = row.extracted_at
+            r.extracted_at = row.extracted_at,
+            r.raw_name = row.raw_name
     """
 
 

@@ -48,21 +48,20 @@ class PaperVectorSearch:
         query_embedding: list[float],
         top_k: int = 5,
     ) -> list[SearchResult]:
+        # db.index.vector.queryNodes is deprecated in favor of the native
+        # SEARCH clause -- index name must be a literal (Cypher rejects a
+        # parameter there), safe to inline since INDEX_NAME is a fixed
+        # module constant, never caller-supplied.
         records, _, _ = self.driver.execute_query(
-            """
-            CALL db.index.vector.queryNodes(
-                $index_name,
-                $top_k,
-                $query_embedding
-            )
-            YIELD node, score
+            f"""
+            MATCH (node:Paper)
+            SEARCH node IN (VECTOR INDEX {INDEX_NAME} FOR $query_embedding LIMIT $top_k)
             RETURN node.arxiv_id AS paper_id,
                    node.title AS title,
                    node.abstract AS abstract,
-                   score
+                   vector.similarity.cosine(node.embedding, $query_embedding) AS score
             ORDER BY score DESC
             """,
-            index_name=INDEX_NAME,
             top_k=top_k,
             query_embedding=query_embedding,
             database_=self.database,

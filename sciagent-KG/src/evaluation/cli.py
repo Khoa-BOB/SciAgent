@@ -11,6 +11,13 @@ from src.evaluation.dataset import (
     load_eval_queries,
     save_eval_queries,
 )
+from src.evaluation.entity_metrics import (
+    GROUND_TRUTH_PATH,
+    SYNONYM_PAIRS,
+    check_resolution,
+    load_ground_truth,
+    score_extraction,
+)
 from src.evaluation.metrics import EvalSummary, QueryResult, summarize
 from src.evaluation.results_log import append_result
 from src.retrieval.graph_expand import GraphExpander
@@ -191,6 +198,68 @@ def cmd_expand(args: argparse.Namespace) -> None:
         print(f"\nRecorded to {RESULTS_PATH}")
 
 
+def cmd_entities(args: argparse.Namespace) -> None:
+    """Benchmark the domain-entity layer: extraction precision/recall/F1
+    against a hand-labeled sample, and entity-resolution merge-rate against
+    a curated synonym list. Distinct from 'run'/'expand', which measure
+    paper retrieval, not entity extraction quality."""
+    rows = load_ground_truth(args.ground_truth)
+    scores = score_extraction(rows)
+
+    header = f"{'Type':<12}{'TP':>6}{'FP':>6}{'FN':>6}{'Precision':>12}{'Recall':>10}{'F1':>10}"
+    print(f"\nExtraction quality ({len(rows)} hand-labeled papers, {args.ground_truth.name})")
+    print(header)
+    print("-" * len(header))
+    for entity_type in ("method", "dataset", "topic", "overall"):
+        s = scores[entity_type]
+        print(
+            f"{entity_type:<12}{s.tp:>6}{s.fp:>6}{s.fn:>6}"
+            f"{s.precision:>12.1%}{s.recall:>10.1%}{s.f1:>10.1%}"
+        )
+
+    driver = get_driver()
+    try:
+        resolution = check_resolution(driver, NEO4J_DATABASE)
+    finally:
+        driver.close()
+
+    print(f"\nResolution quality ({len(SYNONYM_PAIRS)} curated pairs, "
+          f"{len(resolution.evaluable)} with both names present in the corpus)")
+    print(f"  Merge recall (known synonyms that merged):     {resolution.merge_recall:.1%}")
+    print(f"  Merge precision (distinct pairs kept separate): {resolution.merge_precision:.1%}")
+    for case in resolution.cases:
+        if not case.both_present:
+            status = "skip (not both in corpus)"
+        elif case.merged == case.should_merge:
+            status = "OK"
+        else:
+            status = "MISS -- did not merge" if case.should_merge else "FALSE MERGE"
+        print(f"    [{case.entity_type:<7}] {case.name_a!r} / {case.name_b!r}: {status}")
+
+    if args.record:
+        driver = get_driver()
+        try:
+            corpus_size = get_corpus_size(driver, NEO4J_DATABASE)
+        finally:
+            driver.close()
+
+        append_result(
+            RESULTS_PATH,
+            {
+                "type": "entity_extraction_quality",
+                "corpus_size": corpus_size,
+                "sample_size": len(rows),
+                "extraction": {t: asdict(scores[t]) for t in ("method", "dataset", "topic", "overall")},
+                "resolution": {
+                    "merge_recall": resolution.merge_recall,
+                    "merge_precision": resolution.merge_precision,
+                    "evaluable_pairs": len(resolution.evaluable),
+                },
+            },
+        )
+        print(f"\nRecorded to {RESULTS_PATH}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SciAgent retrieval quality.")
     parser.add_argument(
@@ -267,10 +336,27 @@ def parse_args() -> argparse.Namespace:
         help=f"Append this run's results (with timestamp + git commit) to {RESULTS_PATH}",
     )
 
+    entities_parser = subparsers.add_parser(
+        "entities",
+        help="Benchmark domain-entity extraction (precision/recall/F1 vs. a "
+        "hand-labeled sample) and resolution/merge quality (vs. a curated "
+        "synonym list) -- distinct from 'run'/'expand', which measure paper "
+        "retrieval, not entity quality.",
+    )
+    entities_parser.add_argument(
+        "--ground-truth", type=Path, default=GROUND_TRUTH_PATH,
+        help=f"Hand-labeled ground truth JSONL (default: {GROUND_TRUTH_PATH})",
+    )
+    entities_parser.add_argument(
+        "--record",
+        action="store_true",
+        help=f"Append this run's results (with timestamp + git commit) to {RESULTS_PATH}",
+    )
+
     return parser.parse_args()
 
 
-COMMANDS = {"generate": cmd_generate, "run": cmd_run, "expand": cmd_expand}
+COMMANDS = {"generate": cmd_generate, "run": cmd_run, "expand": cmd_expand, "entities": cmd_entities}
 
 
 def main() -> None:

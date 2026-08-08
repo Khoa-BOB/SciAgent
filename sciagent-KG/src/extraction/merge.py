@@ -72,6 +72,10 @@ def merge_resolved(
                 "confidence": row.get("confidence", 1.0),
                 "extraction_model": row.get("extraction_model"),
                 "extracted_at": row.get("extracted_at"),
+                # Pre-clustering name as extracted, may differ from the
+                # canonical entity name above -- kept on the relationship so
+                # it survives independent of the resolve/extract JSONL files.
+                "raw_name": row.get("raw_name"),
             }
             for row in type_rows
         ]
