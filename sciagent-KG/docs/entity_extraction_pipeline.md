@@ -10,7 +10,8 @@ turns the graph from a metadata index into something that can answer "which
 papers use X" or "what does this paper use" without full-text guesswork.
 
 Four stages, one CLI (`src/extraction/cli.py`, subcommands `export` /
-`extract` / `resolve` / `merge`, plus `schema` and `all`):
+`extract` / `resolve` / `merge`, plus `schema`, `all`, and the one-time
+`backfill-embeddings` migration -- see Stage 3's "Incremental mode"):
 
 ```text
 Neo4j (Paper.title, Paper.abstract)
@@ -231,6 +232,35 @@ duration of one `resolve` run. It's carried through to the relationship
 itself in stage 4, so it survives in Neo4j independent of whether the
 `*.extracted.jsonl` source files are still on disk.
 
+### Incremental mode
+
+`resolve()` and `cluster_names()` both accept an optional `existing_clusters`
+seed — per-entity-type `(canonical_name, embedding)` pairs, fetched from
+Neo4j via `merge.fetch_existing_clusters()` — that gets clustered *before*
+the names in `shards_dir` are processed. A new mention then has a real
+chance to join an already-existing canonical entity (via cosine similarity
+or the acronym fallback) instead of only ever comparing against other
+mentions in the same `shards_dir`.
+
+This is what makes `sciagent-backend`'s incremental ingestion follow-up
+(`POST /v1/ingest-jobs?run_extraction=true`) affordable: a small new batch
+of papers only needs its own mentions embedded, compared against the
+(already-computed) embeddings of every existing canonical entity, rather
+than re-embedding and re-clustering the whole historical corpus on every
+job — see `sciagent-backend/specs/02-kg-service-architecture.md` §8.5.
+
+`cli.py resolve --incremental` exposes the same mode manually — it fetches
+`existing_clusters` from Neo4j before resolving `--shards-dir`, so
+`shards_dir` only needs to contain new shards, not the full corpus. Omit
+`--incremental` (the default) for the original from-scratch behavior.
+
+**Prerequisite**: this only works to the extent the corpus already has
+embeddings stored. `cli.py backfill-embeddings` is the one-time migration
+for entities created before this feature existed — computes and stores an
+embedding for every canonical entity missing one (same model/normalization
+`cluster_names()` uses), safe to re-run since it only ever touches nodes
+still missing one.
+
 ---
 
 ## Stage 4 — Merge
@@ -242,18 +272,28 @@ partial `resolve` regeneration; a full retry costs some Neo4j round-trips,
 nothing more. Per entity type:
 
 1. Upsert one node per unique `normalized_name` (`MERGE (e:Method
-   {normalized_name: ...}) ON CREATE SET e.name = ...` — the display `name`
-   is set once, at creation, not overwritten on every merge).
+   {normalized_name: ...}) ON CREATE SET e.name = ..., e.embedding = ...` —
+   the display `name` and `embedding` are set once, at creation, never
+   overwritten on a later merge that matches the same node).
 2. Upsert one relationship per (paper, canonical entity) pair, with
    properties set (and updated) on every merge.
 
+`e.embedding` is only present when `merge_resolved()`'s caller passes a
+`new_embeddings` argument for that entity — `resolve()` supplies one for
+every canonical entity it creates fresh (see Stage 3's incremental-resolve
+note); a manual `cli.py merge` run without a matching `--embeddings-path`
+leaves it unset, same as before this property existed. `merge.backfill_entity_embeddings()`
+(`cli.py backfill-embeddings`) is the one-time migration for entities that
+predate this feature — safe to re-run, only ever touches nodes still
+missing one.
+
 ### Graph shape
 
-| Node label | Key property | Constraint |
-|---|---|---|
-| `Method` | `normalized_name` | `method_name` (unique) |
-| `Dataset` | `normalized_name` | `dataset_name` (unique) |
-| `ResearchTopic` | `normalized_name` | `topic_name` (unique) |
+| Node label | Key property | Constraint | Also has |
+|---|---|---|---|
+| `Method` | `normalized_name` | `method_name` (unique) | `embedding` (not indexed, no constraint — see above) |
+| `Dataset` | `normalized_name` | `dataset_name` (unique) | `embedding` |
+| `ResearchTopic` | `normalized_name` | `topic_name` (unique) | `embedding` |
 
 | Relationship | Pattern | Properties |
 |---|---|---|
@@ -287,6 +327,14 @@ uv run python -m src.extraction.cli merge --resolved-path data/extraction/resolv
 `cli.py all` runs export→extract→resolve→merge in one process — fine for a
 local pilot, not for a real corpus (extraction needs to run as a
 long-lived/background/HPC job independently of the other stages).
+
+`resolve`'s default `--embeddings-output` (`data/extraction/resolved_embeddings.jsonl`)
+and `merge`'s default `--embeddings-path` already point at each other, so
+newly-created canonical entities get their embedding stored automatically
+without extra flags. Once, after upgrading an existing corpus to this
+feature: `uv run python -m src.extraction.cli backfill-embeddings` to
+compute embeddings for every entity that predates it (see Stage 3's
+"Incremental mode" above for why that matters).
 
 See the `sciagent-kg-extract` and `sciagent-kg-extract-status` Claude Code
 skills (`.claude/skills/`) for day-to-day operational commands (starting a

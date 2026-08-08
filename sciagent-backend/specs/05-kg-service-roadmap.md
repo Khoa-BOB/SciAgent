@@ -104,7 +104,10 @@ Near-term #4), so a new paper's "CNN" would never join an existing
   mentions can cluster into already-existing canonical entities, then
   filters `merge` back down to only this job's rows before writing. A
   failure here is caught and reported as `result.extraction.error`, never
-  raised — ingestion has already committed by that point.
+  raised — ingestion has already committed by that point. **Superseded by
+  Sprint 7** below — the full-corpus resolve here got expensive and
+  wasteful as the corpus grows; kept as a historical record of what shipped
+  in this sprint, not the current behavior.
 - `sciagent-KG/src/extraction/resolve.py`: an acronym-detection fallback in
   `cluster_names()` (`_initials`/`_is_acronym_token`/`_acronym_fallback_match`)
   — checked only after cosine similarity already failed, so it's additive,
@@ -132,6 +135,46 @@ Near-term #4), so a new paper's "CNN" would never join an existing
 - No standalone extraction-only endpoint (e.g. `/v1/extraction-jobs`) —
   extraction is only reachable bundled into an ingest job, per Story 1.8's
   explicit out-of-scope note in `01-kg-service-requirements.md` §4.
+
+## Sprint 7 — Incremental resolve via cached entity embeddings
+
+Sprint 6's extraction follow-up worked but didn't scale: resolving against
+the full `data/extraction/shards/` directory on *every* `run_extraction=true`
+job costs ~15 minutes at current corpus scale and gets slower as the corpus
+grows, since it re-embeds and re-clusters every historical raw mention every
+single time. This sprint replaces that with an incrementally-seeded design:
+every canonical entity now carries its own embedding, so a new job only ever
+needs to embed its *own* new mentions and compare them against the existing
+corpus's (already-computed) embeddings — full-corpus context at roughly
+constant cost per job, not cost that grows with corpus size.
+
+- `sciagent-KG`: `Method`/`Dataset`/`ResearchTopic` nodes gain an `embedding`
+  property (set once at creation, never overwritten). `cluster_names()`/
+  `resolve()` gained an `existing_clusters` seed parameter — see
+  `02-kg-service-architecture.md` §8.5, §9. New `merge.fetch_existing_clusters()`
+  (read) and `merge.backfill_entity_embeddings()` (one-time migration for
+  entities that predate this feature, exposed as `cli.py backfill-embeddings`).
+- `kg_service/jobs.py:_run_extraction_followup` rewritten: fetches existing
+  clusters from Neo4j, writes this job's shard into a job-scoped subdirectory
+  (`data/extraction/shards/ingest-jobs/<id>/`, not the flat top-level
+  directory), calls `resolve()` seeded with the fetched clusters, and passes
+  `resolve()`'s new-embeddings output through to `merge_resolved()`. The
+  old "resolve everything, then filter to this job's rows" step is gone
+  entirely — `resolve()` now only ever sees this job's own shard.
+- Unit tests updated/added across both projects for the new signatures
+  (`tests/test_resolve.py`'s seeded-clustering cases, `tests/test_merge.py`,
+  `sciagent-backend/tests/unit/test_jobs.py`).
+
+**Not done yet**:
+- The one-time backfill hasn't been run against the real corpus from this
+  change alone — see the real-corpus verification step carried over from
+  Sprint 6 above; running `backfill-embeddings` is a prerequisite for it now.
+- A live integration test for the incremental path (same gap as Sprint 5/6,
+  now against this design instead).
+- No cap on `existing_clusters`' in-memory size — at current scale
+  (~128k canonical entities, ~768-dim vectors) this is a few hundred MB per
+  extraction-follow-up call, acceptable for now; revisit if the corpus grows
+  an order of magnitude and this becomes a real memory/latency concern.
 
 ## Definition of Done (per endpoint)
 

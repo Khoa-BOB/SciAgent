@@ -91,6 +91,20 @@ resolution 0% merge recall on the 3 evaluable known synonym/acronym pairs
    LaTeX (control characters, mismatched braces) should never become a
    canonical entity. Same zero-cost, immediately-verifiable-via-benchmark
    property as #4.
+6. **Shipped**: incremental resolve. `Method`/`Dataset`/`ResearchTopic`
+   nodes now carry their own `embedding` (set once at creation via
+   `merge.py`'s `ON CREATE SET`), and `cluster_names()`/`resolve()` accept
+   an `existing_clusters` seed so a small new batch of papers can cluster
+   against the *whole* corpus's canonical entities without re-embedding
+   every historical raw mention. `cli.py resolve --incremental` and `cli.py
+   backfill-embeddings` (one-time migration for pre-existing entities) are
+   the CLI surface; `sciagent-backend`'s `POST /v1/ingest-jobs?run_extraction=true`
+   is the primary consumer — see `sciagent-backend/specs/02-kg-service-architecture.md`
+   §8.5 and `docs/entity_extraction_pipeline.md`'s "Incremental mode". This
+   was built specifically because item #4's fix only helps within whatever
+   `resolve` sees at once — without this, an ingest-job-triggered resolve
+   would only ever compare a new paper's mentions against its own batch, not
+   the existing corpus, regardless of the acronym fallback.
 
 None of #1–3 change ingestion or extraction — they're net-new, read-only
 query additions that `sciagent-backend`'s services layer will call. #4 is

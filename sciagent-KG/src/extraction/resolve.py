@@ -77,8 +77,11 @@ def _normalize(name: str) -> str:
 
 
 def cluster_names(
-    names: list[str], model: SentenceTransformer, threshold: float
-) -> dict[str, str]:
+    names: list[str],
+    model: SentenceTransformer,
+    threshold: float,
+    existing_clusters: list[tuple[str, np.ndarray]] | None = None,
+) -> tuple[dict[str, str], dict[str, np.ndarray]]:
     """Greedy nearest-cluster merge: names are processed most-frequent-first
     (so common phrasing claims the canonical slot), and each subsequent name
     joins the most similar existing cluster if cosine similarity clears
@@ -104,22 +107,58 @@ def cluster_names(
     linear rescan of every existing cluster) so this doesn't regress the
     O(n^2)-at-scale cost above: most names aren't acronym-shaped, so the
     lookup is a cheap dict miss for the common case.
+
+    existing_clusters: optional (canonical_name, embedding) pairs already
+    known -- e.g. every canonical entity already in Neo4j -- seeded into the
+    cluster state *before* `names` is processed, so an incoming name can
+    join one of them instead of always minting a new canonical entity from
+    scratch. Embeddings must already be unit-normalized, matching what
+    `model.encode(..., normalize_embeddings=True)` produces below. This is
+    what makes incremental resolution (specs/02-kg-service-architecture.md
+    §8.5 in sciagent-backend) full-corpus-aware without re-embedding the
+    entire historical corpus on every run -- see `resolve()`'s docstring.
+
+    Returns (mapping, new_canonical_embeddings):
+    - mapping: every name in `names` -> its canonical name (which may be one
+      of the seeded `existing_clusters` names).
+    - new_canonical_embeddings: canonical name -> embedding, but only for
+      canonical names that were *not* part of `existing_clusters` (i.e.
+      created fresh in this call). Callers use this to know what actually
+      needs to be persisted -- an existing cluster's embedding is already
+      stored and shouldn't be touched again.
     """
     if not names:
-        return {}
+        return {}, {}
 
     embeddings = model.encode(names, normalize_embeddings=True, show_progress_bar=False)
 
-    canonical_names: list[str] = []
-    canonical_embeddings = np.empty_like(embeddings)
+    seeds = existing_clusters or []
+    canonical_names: list[str] = [name for name, _ in seeds]
+    canonical_embeddings = np.empty((len(seeds) + len(names), embeddings.shape[1]), dtype=embeddings.dtype)
+    for index, (_, embedding) in enumerate(seeds):
+        canonical_embeddings[index] = embedding
+
     # acronym token (e.g. "CNN") -> cluster index, for a cluster whose
     # canonical name is itself acronym-shaped.
     acronym_to_cluster: dict[str, int] = {}
     # initials of a multi-word canonical name (e.g. "CNN", derived from
     # "convolutional neural network") -> cluster index.
     initials_to_cluster: dict[str, int] = {}
+
+    def _index_cluster(name: str, index: int) -> None:
+        if _is_acronym_token(name):
+            acronym_to_cluster.setdefault(name.strip().upper(), index)
+        else:
+            initials = _initials(name)
+            if len(initials) >= 2:
+                initials_to_cluster.setdefault(initials, index)
+
+    for index, name in enumerate(canonical_names):
+        _index_cluster(name, index)
+
     mapping: dict[str, str] = {}
-    cluster_count = 0
+    new_canonical_embeddings: dict[str, np.ndarray] = {}
+    cluster_count = len(canonical_names)
 
     for name, embedding in zip(names, embeddings):
         if cluster_count:
@@ -138,16 +177,12 @@ def cluster_names(
 
         canonical_names.append(name)
         canonical_embeddings[cluster_count] = embedding
-        if _is_acronym_token(name):
-            acronym_to_cluster.setdefault(name.strip().upper(), cluster_count)
-        else:
-            initials = _initials(name)
-            if len(initials) >= 2:
-                initials_to_cluster.setdefault(initials, cluster_count)
+        _index_cluster(name, cluster_count)
+        new_canonical_embeddings[name] = embedding
         cluster_count += 1
         mapping[name] = name
 
-    return mapping
+    return mapping, new_canonical_embeddings
 
 
 def _acronym_fallback_match(
@@ -165,26 +200,57 @@ def _acronym_fallback_match(
     return acronym_to_cluster.get(initials)
 
 
-def resolve(shards_dir: Path, threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> list[dict]:
+def resolve(
+    shards_dir: Path,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    model: SentenceTransformer | None = None,
+    existing_clusters: dict[str, list[tuple[str, np.ndarray]]] | None = None,
+) -> tuple[list[dict], dict[str, dict[str, np.ndarray]]]:
+    """Cluster every raw entity mention under `shards_dir` into canonical
+    entities, per type.
+
+    model: reuse an already-loaded SentenceTransformer instead of loading a
+    fresh one -- matters when this is called once per (small) incremental
+    job rather than once per (large) full-corpus run, where model load time
+    would otherwise dominate. Loads MODEL_NAME itself if not given.
+
+    existing_clusters: optional, per entity_type -> list of (canonical_name,
+    embedding) pairs already in Neo4j (see merge.fetch_existing_clusters),
+    seeded into that type's clustering so a new mention can join an
+    already-existing canonical entity instead of only ever comparing against
+    other mentions in `shards_dir`. This is what makes an incremental
+    resolve (a handful of new papers) still have full-corpus context without
+    re-embedding/re-clustering everything that's already in the graph -- see
+    sciagent-backend/specs/02-kg-service-architecture.md §8.5. Omit for the
+    original full-corpus-from-scratch behavior (the CLI's default).
+
+    Returns (resolved_rows, new_embeddings_by_type) -- the second element is
+    entity_type -> {canonical_name: embedding} for canonical entities that
+    are new in this run (not part of `existing_clusters`), for merge.py to
+    persist. See cluster_names()'s docstring for exactly what "new" means.
+    """
     mentions = load_extractions(shards_dir)
     if not mentions:
-        return []
+        return [], {}
 
-    model = SentenceTransformer(MODEL_NAME)
+    model = model or SentenceTransformer(MODEL_NAME)
 
     by_type: dict[str, list[RawMention]] = defaultdict(list)
     for mention in mentions:
         by_type[mention.entity_type].append(mention)
 
     resolved_rows: list[dict] = []
+    new_embeddings_by_type: dict[str, dict[str, np.ndarray]] = {}
     for entity_type, type_mentions in by_type.items():
         counts = Counter(m.name for m in type_mentions)
         unique_names = [name for name, _ in counts.most_common()]  # most frequent first
-        mapping = cluster_names(unique_names, model, threshold)
+        type_existing = (existing_clusters or {}).get(entity_type)
+        mapping, new_embeddings = cluster_names(unique_names, model, threshold, existing_clusters=type_existing)
+        new_embeddings_by_type[entity_type] = new_embeddings
 
         logger.info(
-            "%s: %d mention(s), %d unique name(s) -> %d canonical entit(y/ies)",
-            entity_type, len(type_mentions), len(unique_names), len(set(mapping.values())),
+            "%s: %d mention(s), %d unique name(s) -> %d canonical entit(y/ies) (%d new)",
+            entity_type, len(type_mentions), len(unique_names), len(set(mapping.values())), len(new_embeddings),
         )
 
         for mention in type_mentions:
@@ -207,7 +273,14 @@ def resolve(shards_dir: Path, threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -
                 }
             )
 
-    return resolved_rows
+    # Re-key new_canonical_embeddings by normalized_name -- merge.py's write
+    # path (and Neo4j's MERGE key) is normalized_name, not the display name.
+    new_embeddings_by_type = {
+        entity_type: {_normalize(name): embedding for name, embedding in embeddings.items()}
+        for entity_type, embeddings in new_embeddings_by_type.items()
+    }
+
+    return resolved_rows, new_embeddings_by_type
 
 
 def parse_args() -> argparse.Namespace:
@@ -229,10 +302,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Standalone entrypoint -- `src.extraction.cli resolve` is the
+    documented way to run this stage (see docs/entity_extraction_pipeline.md)
+    and also persists new canonical embeddings; this one doesn't."""
     args = parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
 
-    rows = resolve(args.shards_dir, threshold=args.threshold)
+    rows, _new_embeddings = resolve(args.shards_dir, threshold=args.threshold)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as output_file:

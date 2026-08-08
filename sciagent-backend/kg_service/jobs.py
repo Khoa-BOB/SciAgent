@@ -14,9 +14,10 @@ just by code convention. See specs/04-kg-service-nfr-testing-deployment.md §3.
 
 Also holds the optional entity-extraction follow-up (run_ingest_job's
 run_extraction flag) -- see _run_extraction_followup's docstring and
-specs/02-kg-service-architecture.md §8.5 for why it's opt-in, why it
-re-resolves against the full shards directory rather than just this job's
-papers, and why merge still only writes rows for this job's papers.
+specs/02-kg-service-architecture.md §8.5 for why it's opt-in and how it
+resolves this job's new mentions against every existing canonical entity in
+Neo4j (via a stored embedding on each entity node) without re-reading
+sciagent-KG's entire historical shards directory on every job.
 """
 
 import json
@@ -131,32 +132,36 @@ def _run_extraction_followup(local_path: Path, driver: Driver) -> dict[str, Any]
     passes run_extraction=True: extract Method/Dataset/ResearchTopic entities
     for exactly the papers this job just loaded.
 
-    Resolve is run against sciagent-KG's FULL persistent shards directory
-    (every historical *.extracted.jsonl, not just this job's new one) so the
-    new mentions get a real chance to cluster into already-existing
-    canonical entities via cosine similarity + the acronym fallback in
-    resolve.py -- resolving only the new shard would compare new mentions
-    against nothing but each other, silently minting a duplicate entity for
-    every paraphrase of something already in the graph (see
-    docs/entity_extraction_pipeline.md Known Limitations). This is the
-    deliberate, expensive-but-correct choice: a full resolve costs ~15
-    minutes at current ~160k-unique-name corpus scale and gets more
-    expensive as the corpus grows -- acceptable for a job that's already
-    asynchronous with a multi-hour timeout, but worth knowing before turning
-    run_extraction on for high-frequency ingestion.
+    Resolve is seeded with every canonical entity already in Neo4j that has
+    a stored embedding (fetch_existing_clusters) -- so a new mention gets a
+    real chance to cluster into an already-existing canonical entity via
+    cosine similarity + the acronym fallback in resolve.py, without
+    re-embedding or re-reading sciagent-KG's entire historical shards
+    directory on every job. This only works to the extent the existing
+    corpus has been backfilled with embeddings (merge.backfill_entity_embeddings)
+    -- an un-backfilled entity is invisible to this seed and won't be a
+    merge candidate until it is. See specs/02-kg-service-architecture.md §8.5.
 
-    merge only writes rows for THIS job's papers, though (filtered after
-    resolve returns everything) -- so the Neo4j write cost stays
-    proportional to what was actually added, not the whole corpus.
+    Because resolve() only ever processes this job's own shard (not the
+    whole corpus), every row it returns already belongs to this job -- no
+    separate filtering step is needed before merge, unlike the old
+    full-corpus-resolve approach this replaced.
     """
     from src.config import NEO4J_DATABASE
     from src.extraction.export import DEFAULT_OUTPUT_DIR as SHARDS_DIR
     from src.extraction.extract import run_extraction as run_llm_extraction
-    from src.extraction.merge import merge_resolved
+    from src.extraction.merge import fetch_existing_clusters, merge_resolved
     from src.extraction.resolve import DEFAULT_SIMILARITY_THRESHOLD, resolve
 
-    shard_path = SHARDS_DIR / f"ingest_{uuid.uuid4().hex[:12]}.jsonl"
-    extracted_path = shard_path.parent / f"{shard_path.stem}.extracted.jsonl"
+    # A job-scoped subdirectory, not the flat top-level SHARDS_DIR -- resolve()
+    # globs every *.extracted.jsonl in whatever directory it's given, and this
+    # job only wants to resolve its OWN new mentions (against the existing_clusters
+    # seed below), not every historical shard the full corpus has ever produced.
+    # Still lives under the persistent data/extraction/ tree, though, so the raw
+    # extracted output survives on disk like every other stage's output does.
+    job_dir = SHARDS_DIR / "ingest-jobs" / uuid.uuid4().hex[:12]
+    shard_path = job_dir / "shard.jsonl"
+    extracted_path = job_dir / "shard.extracted.jsonl"
 
     arxiv_ids = _build_extraction_shard(local_path, shard_path)
     if not arxiv_ids:
@@ -164,15 +169,21 @@ def _run_extraction_followup(local_path: Path, driver: Driver) -> dict[str, Any]
 
     extracted = run_llm_extraction(shard_path, extracted_path, _get_extraction_client(), resume=False)
 
-    resolved_rows = resolve(SHARDS_DIR, threshold=DEFAULT_SIMILARITY_THRESHOLD)
-    job_arxiv_ids = set(arxiv_ids)
-    job_rows = [row for row in resolved_rows if row["paper_id"] in job_arxiv_ids]
+    existing_clusters = fetch_existing_clusters(driver, NEO4J_DATABASE)
+    resolved_rows, new_embeddings = resolve(
+        job_dir,
+        threshold=DEFAULT_SIMILARITY_THRESHOLD,
+        model=_get_embedding_model(),
+        existing_clusters=existing_clusters,
+    )
 
-    entities_written, relationships_written = merge_resolved(driver, NEO4J_DATABASE, job_rows)
+    entities_written, relationships_written = merge_resolved(
+        driver, NEO4J_DATABASE, resolved_rows, new_embeddings=new_embeddings
+    )
 
     logger.info(
         "Extraction follow-up for %s: extracted=%d entities=%d relationships=%d",
-        shard_path.name, extracted, entities_written, relationships_written,
+        job_dir.name, extracted, entities_written, relationships_written,
     )
     return {
         "papers_extracted": extracted,

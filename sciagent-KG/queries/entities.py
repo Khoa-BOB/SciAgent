@@ -20,11 +20,18 @@ RELATION_TYPES: dict[str, str] = {
 
 
 def upsert_entities_query(entity_type: str) -> str:
+    """`row.embedding` is only ever present for a canonical entity that's
+    genuinely new in this merge run (src/extraction/resolve.py's
+    new_canonical_embeddings) -- an existing entity already has one stored,
+    and ON CREATE SET simply doesn't fire for a MERGE that matched an
+    existing node, so this never overwrites it. See
+    src/extraction/merge.py's fetch_existing_clusters()/backfill_entity_embeddings()
+    for how entities end up with an embedding in the first place."""
     label = ENTITY_LABELS[entity_type]
     return f"""
         UNWIND $rows AS row
         MERGE (e:{label} {{normalized_name: row.normalized_name}})
-        ON CREATE SET e.name = row.name
+        ON CREATE SET e.name = row.name, e.embedding = row.embedding
     """
 
 
@@ -107,4 +114,45 @@ def papers_for_entity_query(entity_type: str) -> str:
         RETURN p.arxiv_id AS paper_id, p.title AS title, r.confidence AS confidence
         ORDER BY r.confidence DESC
         LIMIT $limit
+    """
+
+
+# --- Incremental resolve support (src/extraction/merge.py) -----------------
+# specs/02-kg-service-architecture.md §8.5: lets a small, new batch of raw
+# entity mentions cluster against every canonical entity already in the
+# graph without re-embedding/re-reading the whole historical corpus.
+
+def entities_with_embeddings_query(entity_type: str) -> str:
+    """Every canonical entity of this type that already has an embedding
+    stored -- the seed set for src.extraction.resolve.cluster_names()'s
+    `existing_clusters` parameter."""
+    label = ENTITY_LABELS[entity_type]
+    return f"""
+        MATCH (e:{label})
+        WHERE e.embedding IS NOT NULL
+        RETURN e.name AS name, e.embedding AS embedding
+    """
+
+
+def entities_missing_embedding_query(entity_type: str) -> str:
+    """Canonical entities created before this feature existed (or by a
+    caller that didn't pass one) -- the backfill target for
+    merge.backfill_entity_embeddings()."""
+    label = ENTITY_LABELS[entity_type]
+    return f"""
+        MATCH (e:{label})
+        WHERE e.embedding IS NULL
+        RETURN e.normalized_name AS normalized_name, e.name AS name
+    """
+
+
+def set_entity_embeddings_query(entity_type: str) -> str:
+    """Backfill write: SET (not ON CREATE SET) since these nodes already
+    exist -- merge.backfill_entity_embeddings() is the only caller, and only
+    ever targets nodes entities_missing_embedding_query() just returned."""
+    label = ENTITY_LABELS[entity_type]
+    return f"""
+        UNWIND $rows AS row
+        MATCH (e:{label} {{normalized_name: row.normalized_name}})
+        SET e.embedding = row.embedding
     """

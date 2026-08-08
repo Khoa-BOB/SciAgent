@@ -143,24 +143,30 @@ def test_run_extraction_followup_skips_when_no_eligible_papers(monkeypatch: pyte
     assert result == {"papers_extracted": 0, "entities_written": 0, "relationships_written": 0}
 
 
-def test_run_extraction_followup_resolves_against_full_corpus_but_merges_only_job_rows(
+def test_run_extraction_followup_seeds_resolve_from_neo4j_and_scopes_to_job_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     shards_dir = tmp_path / "shards"
     monkeypatch.setattr("src.extraction.export.DEFAULT_OUTPUT_DIR", shards_dir)
     monkeypatch.setattr(jobs, "_get_extraction_client", lambda: MagicMock())
+    monkeypatch.setattr(jobs, "_get_embedding_model", lambda: object())
     monkeypatch.setattr("src.extraction.extract.run_extraction", MagicMock(return_value=2))
 
-    # resolve() is mocked to return rows spanning both this job's new papers
-    # and an already-existing paper from a previous job/corpus -- the whole
-    # point of resolving against the full shards dir -- to prove merge only
-    # writes back the new job's rows, not the entire corpus every time.
+    # fetch_existing_clusters() stands in for a Neo4j read of every canonical
+    # entity that already has a stored embedding -- the whole point of the
+    # incremental design (specs/02-kg-service-architecture.md §8.5) is that
+    # resolve() gets seeded with this instead of re-reading the whole corpus.
+    existing_clusters = {"method": [("graph neural network", "fake-embedding")], "dataset": [], "topic": []}
+    fake_fetch = MagicMock(return_value=existing_clusters)
+    monkeypatch.setattr("src.extraction.merge.fetch_existing_clusters", fake_fetch)
+
     resolved_rows = [
         {"paper_id": "2401.00001", "entity_type": "method", "name": "graph neural network", "normalized_name": "graph neural network", "raw_name": "GNN"},
         {"paper_id": "2401.00002", "entity_type": "method", "name": "graph neural network", "normalized_name": "graph neural network", "raw_name": "graph neural network"},
-        {"paper_id": "9999.00000", "entity_type": "method", "name": "unrelated pre-existing entity", "normalized_name": "unrelated pre-existing entity", "raw_name": "..."},
     ]
-    monkeypatch.setattr("src.extraction.resolve.resolve", MagicMock(return_value=resolved_rows))
+    new_embeddings = {"method": {}}
+    fake_resolve = MagicMock(return_value=(resolved_rows, new_embeddings))
+    monkeypatch.setattr("src.extraction.resolve.resolve", fake_resolve)
 
     fake_merge = MagicMock(return_value=(1, 2))
     monkeypatch.setattr("src.extraction.merge.merge_resolved", fake_merge)
@@ -180,10 +186,25 @@ def test_run_extraction_followup_resolves_against_full_corpus_but_merges_only_jo
     result = jobs._run_extraction_followup(upload_path, driver)
 
     assert result == {"papers_extracted": 2, "entities_written": 1, "relationships_written": 2}
+
+    fake_fetch.assert_called_once()
+    assert fake_fetch.call_args.args[0] is driver
+
+    fake_resolve.assert_called_once()
+    resolved_shard_dir = fake_resolve.call_args.args[0]
+    # A job-scoped subdirectory under the shards tree, NOT the flat shards_dir
+    # itself -- resolve() globs every *.extracted.jsonl in whatever directory
+    # it's given, so scoping to just this job's own new shard is what keeps
+    # this job from re-processing the whole historical corpus.
+    assert resolved_shard_dir != shards_dir
+    assert resolved_shard_dir.parent.name == "ingest-jobs"
+    assert resolved_shard_dir.parent.parent == shards_dir
+    assert fake_resolve.call_args.kwargs["existing_clusters"] is existing_clusters
+
     fake_merge.assert_called_once()
-    merged_driver, _database, merged_rows = fake_merge.call_args.args
-    assert merged_driver is driver
-    assert {row["paper_id"] for row in merged_rows} == {"2401.00001", "2401.00002"}
+    assert fake_merge.call_args.args[0] is driver
+    assert fake_merge.call_args.args[2] == resolved_rows
+    assert fake_merge.call_args.kwargs["new_embeddings"] is new_embeddings
 
 
 def test_run_ingest_job_with_extraction_success(monkeypatch: pytest.MonkeyPatch) -> None:

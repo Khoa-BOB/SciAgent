@@ -237,34 +237,43 @@ CLI runs, scoped to exactly the papers this job loaded:
 
 1. **Export**: built directly from the already-downloaded upload (no second
    Neo4j round trip), filtered to papers with a non-blank title/abstract —
-   same eligibility rule as `sciagent-KG`'s `export_papers()`.
+   same eligibility rule as `sciagent-KG`'s `export_papers()`. Written into
+   a job-scoped subdirectory (`data/extraction/shards/ingest-jobs/<id>/`),
+   not the flat top-level shards directory — `resolve()`'s step below only
+   needs to see this job's own new shard, not the whole corpus (see #3).
 2. **Extract**: one `ExtractionClient` call per paper (`src.extraction.extract.run_extraction`,
    `resume=False` — a fresh per-job shard has no prior checkpoint to resume).
    Backend configured via `EXTRACTION_BASE_URL`/`EXTRACTION_MODEL`/`EXTRACTION_API_KEY`
    (worker-only env vars, same pattern as `KG_WRITE_NEO4J_*` — never read by
    the API process). Defaults to local Ollama, matching `sciagent-KG`'s own
    CLI default; pointing this at OpenAI costs real money per paper.
-3. **Resolve — against the full corpus, not just this job's shard**: `resolve()`
-   runs over `sciagent-KG`'s entire persistent `data/extraction/shards/`
-   directory (every historical `*.extracted.jsonl`, plus this job's new
-   one), not just the papers this job added. Resolving only the new shard
-   would compare new mentions against nothing but each other — a paper
-   mentioning "CNN" would never get a chance to cluster into the
-   already-existing "convolutional neural network" entity, silently minting
-   a duplicate every time. Full-corpus resolve also benefits from the
-   acronym fallback added in `sciagent-KG/src/extraction/resolve.py` (§9),
-   which specifically targets this class of miss. The cost: a full resolve
-   is ~15 minutes at current ~160k-unique-name corpus scale and grows with
-   the corpus — acceptable for an already-asynchronous job with a long
-   timeout, but a real latency/cost tradeoff to know about before enabling
-   `run_extraction` on high-frequency ingestion.
-4. **Merge — only this job's rows**: `resolve()`'s output spans the whole
-   corpus, but `_run_extraction_followup` filters it down to rows whose
-   `paper_id` is one of this job's papers before calling `merge_resolved()`.
-   `merge` is idempotent either way, but writing back the entire corpus's
-   relationships on every single ingest job would be wasteful at scale for
-   no benefit — every other paper's relationships are already correct in
-   Neo4j from when they were originally merged.
+3. **Resolve — seeded from Neo4j, not a full-corpus re-read**: every
+   canonical `Method`/`Dataset`/`ResearchTopic` node stores its own
+   embedding (§9's schema addition). Before resolving, the worker fetches
+   every existing canonical entity that has one
+   (`src.extraction.merge.fetch_existing_clusters`) and passes it as
+   `resolve()`'s `existing_clusters` seed. A new mention then gets compared
+   against the *whole corpus's* canonical entities via cosine similarity +
+   the acronym fallback in `resolve.py` — e.g. a paper mentioning "CNN" can
+   still cluster into the already-existing "convolutional neural network"
+   entity — without re-embedding or re-reading every historical
+   `*.extracted.jsonl` file on every job. This replaced an earlier version
+   of this feature that resolved against the full shards directory on every
+   run (~15 minutes at ~160k names, growing with the corpus); the seeded
+   approach only embeds *this job's* new mentions, so its cost stays
+   roughly constant regardless of corpus size. The one requirement: this
+   only works to the extent the corpus has been backfilled with embeddings
+   (`merge.backfill_entity_embeddings`, §9) — an entity created before that
+   backfill (or by a caller that skipped it) is invisible to this seed and
+   won't be a merge candidate until it's backfilled.
+4. **Merge**: because `resolve()` only ever processes this job's own shard
+   (not the whole corpus), every row it returns already belongs to this job
+   — no separate filtering step is needed before `merge_resolved()`, unlike
+   the full-corpus-resolve version this replaced. `merge_resolved` also
+   receives `resolve()`'s second return value (`new_embeddings`) so a
+   genuinely new canonical entity gets its embedding stored on creation —
+   keeping the corpus's embedding coverage complete going forward without a
+   repeated backfill.
 
 Failure handling: an extraction failure (LLM backend unreachable, etc.) is
 caught and reported in the job result's `extraction.error` field, not
@@ -283,16 +292,33 @@ Minimal, additive only:
   Cypher.
 - A `stats` query (paper count, entity counts by label) — trivial `MATCH ...
   RETURN count(*)` queries, net new but tiny.
-- No changes to ingestion or the graph schema itself — §8's worker calls the
-  existing `src/ingestion/` functions as-is.
+- No changes to ingestion — §8's worker calls the existing `src/ingestion/`
+  functions as-is.
 - One change to extraction: an acronym-detection fallback in
   `src/extraction/resolve.py`'s `cluster_names()`, additive alongside the
   existing cosine-similarity check (never replacing it) — see
-  `sciagent-KG/specs/04-roadmap.md` Near-term #4 and
+  `sciagent-KG/specs/04-roadmap.md` and
   `docs/entity_extraction_pipeline.md` Known Limitations for why this exists
-  and what it does/doesn't fix. §8.5's full-corpus resolve directly benefits
-  from this, since it's the mechanism most likely to catch a new paper's
-  acronym matching an existing expansion (or vice versa).
+  and what it does/doesn't fix.
+- One additive graph-schema change: `Method`/`Dataset`/`ResearchTopic` nodes
+  gain an `embedding` property, set once at creation
+  (`queries/entities.py:upsert_entities_query`'s `ON CREATE SET`) and never
+  overwritten after — this is what §8.5's incremental resolve seeds from.
+  No constraint change needed (not a uniqueness key, just a property); an
+  entity created before this feature simply has no `embedding` until
+  backfilled.
+- `cluster_names()`/`resolve()` (`src/extraction/resolve.py`) both gained an
+  `existing_clusters` parameter to seed clustering with entities that
+  already exist elsewhere (e.g. in Neo4j) — optional, defaults to the
+  original from-scratch behavior when omitted (the CLI's default). `resolve()`
+  also now returns the embeddings of any canonical entity it newly created,
+  for `merge_resolved()` to persist.
+- `merge.py` gained `fetch_existing_clusters()` (reads every canonical
+  entity with a stored embedding, per type — the seed §8.5 uses) and
+  `backfill_entity_embeddings()` (one-time migration: computes+stores an
+  embedding for every canonical entity that doesn't have one yet, using the
+  same model/normalization as `cluster_names()` — safe to re-run, only
+  touches nodes still missing one). Exposed as `cli.py backfill-embeddings`.
 
 ## 10. Exit criteria for this phase
 

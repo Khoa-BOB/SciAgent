@@ -31,13 +31,21 @@ from src.extraction.extract import (
     run_extraction,
 )
 from src.extraction.llm_client import ExtractionClient, resolve_api_key
-from src.extraction.merge import merge_resolved, read_resolved
+from src.extraction.merge import (
+    backfill_entity_embeddings,
+    fetch_existing_clusters,
+    merge_resolved,
+    read_embeddings,
+    read_resolved,
+)
 from src.extraction.resolve import DEFAULT_SIMILARITY_THRESHOLD, resolve
+from src.ingestion.embeddings.index_papers import MODEL_NAME as EMBEDDING_MODEL_NAME
 from src.ingestion.schema import apply_schema
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RESOLVED_PATH = Path(__file__).parents[2] / "data/extraction/resolved.jsonl"
+DEFAULT_EMBEDDINGS_PATH = Path(__file__).parents[2] / "data/extraction/resolved_embeddings.jsonl"
 
 
 def cmd_schema(args: argparse.Namespace) -> None:
@@ -105,26 +113,74 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
-    rows = resolve(args.shards_dir, threshold=args.threshold)
+    existing_clusters = None
+    if args.incremental:
+        driver = get_driver()
+        try:
+            existing_clusters = fetch_existing_clusters(driver, NEO4J_DATABASE)
+        finally:
+            driver.close()
+        logger.info(
+            "Incremental: seeded with %s",
+            ", ".join(f"{t}={len(c)}" for t, c in existing_clusters.items()),
+        )
+
+    rows, new_embeddings_by_type = resolve(args.shards_dir, threshold=args.threshold, existing_clusters=existing_clusters)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as output_file:
         for row in rows:
             output_file.write(json.dumps(row, ensure_ascii=False) + "\n")
-    logger.info("Resolved %d (paper, entity) row(s) into %s", len(rows), args.output)
+
+    embedding_count = 0
+    args.embeddings_output.parent.mkdir(parents=True, exist_ok=True)
+    with args.embeddings_output.open("w", encoding="utf-8") as embeddings_file:
+        for entity_type, embeddings in new_embeddings_by_type.items():
+            for normalized_name, embedding in embeddings.items():
+                embeddings_file.write(
+                    json.dumps(
+                        {"entity_type": entity_type, "normalized_name": normalized_name, "embedding": embedding.tolist()},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                embedding_count += 1
+
+    logger.info(
+        "Resolved %d (paper, entity) row(s) into %s, %d new canonical embedding(s) into %s",
+        len(rows), args.output, embedding_count, args.embeddings_output,
+    )
 
 
 def cmd_merge(args: argparse.Namespace) -> None:
     rows = read_resolved(args.resolved_path)
+    new_embeddings = read_embeddings(args.embeddings_path)
     driver = get_driver()
     try:
         entities_written, relations_written = merge_resolved(
-            driver, NEO4J_DATABASE, rows, batch_size=args.batch_size
+            driver, NEO4J_DATABASE, rows, new_embeddings=new_embeddings, batch_size=args.batch_size
         )
     finally:
         driver.close()
     logger.info(
         "Merged %d entity upsert(s), %d relationship upsert(s)",
         entities_written, relations_written,
+    )
+
+
+def cmd_backfill_embeddings(args: argparse.Namespace) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    driver = get_driver()
+    try:
+        counts = backfill_entity_embeddings(driver, NEO4J_DATABASE, model, batch_size=args.batch_size)
+    finally:
+        driver.close()
+    total = sum(counts.values())
+    logger.info(
+        "Backfilled %d entit(y/ies) total (%s)",
+        total, ", ".join(f"{t}={n}" for t, n in counts.items()),
     )
 
 
@@ -188,11 +244,26 @@ def parse_args() -> argparse.Namespace:
     resolve_parser = subparsers.add_parser("resolve", help="Cluster extracted entity names into canonical entities.")
     resolve_parser.add_argument("--shards-dir", type=Path, default=DEFAULT_SHARDS_DIR)
     resolve_parser.add_argument("--output", type=Path, default=DEFAULT_RESOLVED_PATH)
+    resolve_parser.add_argument("--embeddings-output", type=Path, default=DEFAULT_EMBEDDINGS_PATH, help="Where to write newly-created canonical entities' embeddings (default: %(default)s)")
     resolve_parser.add_argument("--threshold", type=float, default=DEFAULT_SIMILARITY_THRESHOLD)
+    resolve_parser.add_argument(
+        "--incremental", action="store_true",
+        help="Seed clustering with every canonical entity already in Neo4j that has "
+        "a stored embedding (see backfill-embeddings), so shards_dir only needs to "
+        "contain the NEW papers -- not the whole historical corpus. Needs a live "
+        "Neo4j connection (the non-incremental default doesn't).",
+    )
 
     merge_parser = subparsers.add_parser("merge", help="Merge resolved entities/relationships into Neo4j.")
     merge_parser.add_argument("--resolved-path", type=Path, default=DEFAULT_RESOLVED_PATH)
+    merge_parser.add_argument("--embeddings-path", type=Path, default=DEFAULT_EMBEDDINGS_PATH, help="Companion file from 'resolve' (default: %(default)s; missing file is fine, just skips embeddings)")
     merge_parser.add_argument("--batch-size", type=int, default=500)
+
+    backfill_parser = subparsers.add_parser(
+        "backfill-embeddings",
+        help="One-time migration: compute+store an embedding for every existing canonical entity missing one.",
+    )
+    backfill_parser.add_argument("--batch-size", type=int, default=500)
 
     all_parser = subparsers.add_parser("all", help="Run every stage in sequence (local/pilot use -- not for HPC).")
     all_parser.add_argument("--output-dir", type=Path, default=DEFAULT_SHARDS_DIR, dest="output_dir")
@@ -206,8 +277,11 @@ def parse_args() -> argparse.Namespace:
     )
     all_parser.add_argument("--no-resume", action="store_true")
     all_parser.add_argument("--output", type=Path, default=DEFAULT_RESOLVED_PATH)
+    all_parser.add_argument("--embeddings-output", type=Path, default=DEFAULT_EMBEDDINGS_PATH)
+    all_parser.add_argument("--embeddings-path", type=Path, default=DEFAULT_EMBEDDINGS_PATH)
     all_parser.add_argument("--resolved-path", type=Path, default=DEFAULT_RESOLVED_PATH)
     all_parser.add_argument("--threshold", type=float, default=DEFAULT_SIMILARITY_THRESHOLD)
+    all_parser.add_argument("--incremental", action="store_true")
     all_parser.add_argument("--batch-size", type=int, default=500)
     _add_common_llm_args(all_parser)
 
@@ -220,6 +294,7 @@ COMMANDS = {
     "extract": cmd_extract,
     "resolve": cmd_resolve,
     "merge": cmd_merge,
+    "backfill-embeddings": cmd_backfill_embeddings,
     "all": cmd_all,
 }
 
