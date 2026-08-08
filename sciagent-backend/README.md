@@ -63,12 +63,15 @@ uv run pytest tests/integration   # needs NEO4J_* pointed at a real/test instanc
 
 ## Current status
 
-Scaffolding only (per `specs/05-kg-service-roadmap.md` Sprint 1): app wiring,
-error model, auth, health checks, and `GET /v1/papers/{arxiv_id}` are real.
-Everything else in `kg_service/services/` raises `NotImplementedError`
-(surfaced as HTTP `501`) with a comment pointing at the roadmap sprint that
-implements it — build against `specs/03-kg-service-api-spec.md`, not around
-it.
+All `/v1/` endpoints in `specs/03-kg-service-api-spec.md` are implemented
+and wired to `sciagent-KG`'s query/retrieval classes: paper lookup, search
+(fulltext/semantic/by-author/by-category/by-year), graph expansion,
+entities, and stats. The one exception is `GET
+/v1/papers/{arxiv_id}/embedding`, which still raises `NotImplementedError`
+(surfaced as HTTP `501`) — see `specs/05-kg-service-roadmap.md` Sprint 1.
+Sprint 4 hardening (load testing, read-only-credential enforcement test,
+OpenAPI contract-diff check in CI, production dashboards/alerting) hasn't
+started.
 
 ## Docker
 
