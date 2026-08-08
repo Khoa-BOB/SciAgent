@@ -1,0 +1,15 @@
+"""Service-to-service auth: a static API key in X-Service-Key, checked
+against an allowlist. No end-user auth here -- that's the BFF's job, see
+specs/01-kg-service-requirements.md §4 and specs/02-kg-service-architecture.md §6.
+"""
+
+from fastapi import Header
+
+from kg_service.config import ALLOWED_SERVICE_KEYS
+from kg_service.errors import ApiError, ErrorCode
+
+
+def require_service_key(x_service_key: str | None = Header(default=None)) -> str:
+    if not x_service_key or x_service_key not in ALLOWED_SERVICE_KEYS:
+        raise ApiError(401, ErrorCode.UNAUTHENTICATED, "Missing or invalid X-Service-Key.")
+    return x_service_key

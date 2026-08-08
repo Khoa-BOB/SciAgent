@@ -1,0 +1,22 @@
+[project]
+name = "sciagent-backend"
+version = "0.1.0"
+description = "SciAgent backend services (KG Service first) -- see specs/"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.141.1",
+    "neo4j>=6.2.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.2.2",
+    "sentence-transformers>=5.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "httpx>=0.28.1",
+    "mypy>=1.14.0",
+    "ruff>=0.9.0",
+]
