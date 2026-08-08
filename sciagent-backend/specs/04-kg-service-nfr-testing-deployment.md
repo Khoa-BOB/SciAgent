@@ -109,6 +109,17 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
   `apply_schema`/`load_metadata`/`run_embedding`/`run_validation` with the
   worker's own driver and always closes it, including on failure. All mocked
   — no live Neo4j/MinIO/Redis required.
+- Extraction follow-up (`test_jobs.py`, architecture doc §8.5): the shard
+  built from an upload excludes records missing `id`/title/abstract;
+  `_run_extraction_followup` filters `resolve()`'s full-corpus output down
+  to `merge()`ing only this job's papers (a fixture asserts a pre-existing,
+  unrelated paper's row is dropped before merge, not just that merge was
+  called); a `run_extraction=True` job with a failing extraction step still
+  returns the ingestion fields normally with `extraction.error` set, not a
+  failed job. `sciagent-KG/tests/test_resolve.py` covers the acronym
+  fallback itself (both merge directions, and that it doesn't fire when
+  cosine similarity already would have, or for genuinely unrelated names)
+  with a fake embedding model — no real model download needed.
 
 ### Integration tests
 
@@ -183,8 +194,14 @@ API container, wired together in the root `docker-compose.yml`:
   (`sciagent-backend/.env.worker`, not `.env`) containing `KG_WRITE_NEO4J_*`,
   `MINIO_*`, `REDIS_URL` — but no `KG_SERVICE_ALLOWED_KEYS`/`NEO4J_*`
   read-only creds, since it never serves a read request. Scale this
-  independently of `kg-service` replica count — it's CPU-bound (embedding)
-  and I/O-bound (Neo4j writes), not request-concurrency-bound.
+  independently of `kg-service` replica count — it's CPU-bound (embedding,
+  spaCy candidate extraction) and I/O-bound (Neo4j writes, LLM calls when
+  `run_extraction` is used), not request-concurrency-bound. The image also
+  needs `en_core_web_sm` (spaCy model, `Dockerfile` runs `spacy download`
+  at build time) and, if `run_extraction` will ever be used,
+  `EXTRACTION_BASE_URL`/`EXTRACTION_MODEL`/`EXTRACTION_API_KEY` in
+  `.env.worker` (architecture doc §8.5) — optional env vars, only needed
+  when that flag is actually exercised.
 - **`minio`** — S3-compatible object storage for staged uploads. Not
   exposed to any caller outside this deployment; only `kg-service` (PUTs)
   and `kg-worker` (GETs) talk to it.

@@ -216,16 +216,61 @@ it, not several minutes later inside a worker log nobody's watching:
   INGEST_FILE_INVALID_JSONL`.
 - Zero valid records → `422 INGEST_FILE_EMPTY`.
 
-### 8.4 Entity extraction is a deliberate follow-up, not automatic
+### 8.4 Entity extraction is opt-in, never automatic
 
-`/v1/ingest-jobs` only runs the ingestion pipeline (metadata + embeddings).
-It does not trigger entity extraction for the newly-added papers — matches
-the existing non-goal in `sciagent-KG/specs/01-requirements.md` §4 ("no
-automatic, unattended re-extraction on a schedule"). `papers_needing_extraction()`
-already recomputes fresh from what's on disk, so it picks up any paper
-missing entities regardless of how it was ingested — a separately-triggered
-extraction run (CLI, for now) covers papers added through this endpoint the
-same way it covers any other gap.
+`/v1/ingest-jobs` always runs the ingestion pipeline (metadata + embeddings).
+It only runs entity extraction if the caller explicitly passes
+`run_extraction=true` — matches the existing non-goal in
+`sciagent-KG/specs/01-requirements.md` §4 ("no automatic, unattended
+re-extraction on a schedule"). There is no default-on path and no
+scheduling; the flag has to be set on every request that wants it, same as
+`sciagent-KG`'s own extraction CLI has to be invoked deliberately. Without
+the flag, `papers_needing_extraction()` still picks up the new papers
+whenever someone runs the extraction CLI separately — this flag is a
+convenience for doing it in the same request, not the only way to do it.
+
+### 8.5 The extraction follow-up, when requested
+
+When `run_extraction=true`, the worker (`kg_service/jobs.py:_run_extraction_followup`)
+runs the same `export → extract → resolve → merge` stages `sciagent-KG`'s
+CLI runs, scoped to exactly the papers this job loaded:
+
+1. **Export**: built directly from the already-downloaded upload (no second
+   Neo4j round trip), filtered to papers with a non-blank title/abstract —
+   same eligibility rule as `sciagent-KG`'s `export_papers()`.
+2. **Extract**: one `ExtractionClient` call per paper (`src.extraction.extract.run_extraction`,
+   `resume=False` — a fresh per-job shard has no prior checkpoint to resume).
+   Backend configured via `EXTRACTION_BASE_URL`/`EXTRACTION_MODEL`/`EXTRACTION_API_KEY`
+   (worker-only env vars, same pattern as `KG_WRITE_NEO4J_*` — never read by
+   the API process). Defaults to local Ollama, matching `sciagent-KG`'s own
+   CLI default; pointing this at OpenAI costs real money per paper.
+3. **Resolve — against the full corpus, not just this job's shard**: `resolve()`
+   runs over `sciagent-KG`'s entire persistent `data/extraction/shards/`
+   directory (every historical `*.extracted.jsonl`, plus this job's new
+   one), not just the papers this job added. Resolving only the new shard
+   would compare new mentions against nothing but each other — a paper
+   mentioning "CNN" would never get a chance to cluster into the
+   already-existing "convolutional neural network" entity, silently minting
+   a duplicate every time. Full-corpus resolve also benefits from the
+   acronym fallback added in `sciagent-KG/src/extraction/resolve.py` (§9),
+   which specifically targets this class of miss. The cost: a full resolve
+   is ~15 minutes at current ~160k-unique-name corpus scale and grows with
+   the corpus — acceptable for an already-asynchronous job with a long
+   timeout, but a real latency/cost tradeoff to know about before enabling
+   `run_extraction` on high-frequency ingestion.
+4. **Merge — only this job's rows**: `resolve()`'s output spans the whole
+   corpus, but `_run_extraction_followup` filters it down to rows whose
+   `paper_id` is one of this job's papers before calling `merge_resolved()`.
+   `merge` is idempotent either way, but writing back the entire corpus's
+   relationships on every single ingest job would be wasteful at scale for
+   no benefit — every other paper's relationships are already correct in
+   Neo4j from when they were originally merged.
+
+Failure handling: an extraction failure (LLM backend unreachable, etc.) is
+caught and reported in the job result's `extraction.error` field, not
+raised — ingestion has already committed successfully by the time
+extraction runs, so a downstream LLM hiccup must not retroactively turn a
+successful "papers added" job into a reported failure.
 
 ## 9. What changes in `sciagent-KG` to support this
 
@@ -238,8 +283,16 @@ Minimal, additive only:
   Cypher.
 - A `stats` query (paper count, entity counts by label) — trivial `MATCH ...
   RETURN count(*)` queries, net new but tiny.
-- No changes to ingestion, extraction, or the graph schema itself — §8's
-  worker calls the existing `src/ingestion/` functions as-is.
+- No changes to ingestion or the graph schema itself — §8's worker calls the
+  existing `src/ingestion/` functions as-is.
+- One change to extraction: an acronym-detection fallback in
+  `src/extraction/resolve.py`'s `cluster_names()`, additive alongside the
+  existing cosine-similarity check (never replacing it) — see
+  `sciagent-KG/specs/04-roadmap.md` Near-term #4 and
+  `docs/entity_extraction_pipeline.md` Known Limitations for why this exists
+  and what it does/doesn't fix. §8.5's full-corpus resolve directly benefits
+  from this, since it's the mechanism most likely to catch a new paper's
+  acronym matching an existing expansion (or vice versa).
 
 ## 10. Exit criteria for this phase
 

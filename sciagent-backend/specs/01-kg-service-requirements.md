@@ -150,13 +150,21 @@ that** growing the corpus doesn't require terminal access to `sciagent-KG`.
   1.1 in `sciagent-KG/specs/01-requirements.md`).
 - Gated by a separate, write-scoped credential/key from every read endpoint
   above — see `02-kg-service-architecture.md` §8.
-- Does **not** trigger entity extraction — that stays a deliberate, separate
-  step (§8.4 of the architecture doc).
+- Entity extraction is **opt-in**, never automatic: a caller must explicitly
+  pass `run_extraction=true` for this job to also extract/resolve/merge
+  entities for the papers it loaded; the default is metadata + embeddings
+  only (§8.4 of the architecture doc). When requested, `resolve` runs
+  against the full existing corpus (not just this upload) so new mentions
+  can cluster into already-existing canonical entities instead of minting
+  duplicates — see §8.5.
 
 ## 4. Explicitly out of scope for v1
 
-- Any write/mutate endpoint beyond `/v1/ingest-jobs` (Story 1.8) — entity
-  extraction in particular stays CLI-driven; see architecture doc §8.4.
+- Any write/mutate endpoint beyond `/v1/ingest-jobs` (Story 1.8). Entity
+  extraction *can* run through this endpoint now (opt-in `run_extraction`,
+  architecture doc §8.5), but it's still not automatic, scheduled, or
+  triggerable independently of an ingest job — no standalone
+  `/v1/extraction-jobs` endpoint exists.
 - Pagination cursors beyond simple `limit`/`offset` (deferred until a caller
   needs to page through more than one bounded result page).
 - Combined multi-filter search (author + category + year in one call).

@@ -191,8 +191,11 @@ processed independently):
 2. Embed every unique name with `google/embeddinggemma-300m` (same model the
    retrieval pipeline uses — no new model dependency).
 3. Walk names in frequency order; each one joins the most-similar existing
-   cluster if cosine similarity clears `--threshold` (default `0.85`),
-   otherwise it starts a new cluster and becomes canonical for that cluster.
+   cluster if cosine similarity clears `--threshold` (default `0.85`); if
+   not, a second-chance acronym-detection check runs before giving up (a
+   short all-caps token joining a cluster whose name's initials spell it,
+   or vice versa — see Known Limitations below); only if neither matches
+   does the name start a new cluster and become canonical for it.
 
 Comparisons run as a matrix-vector product (`canonical_embeddings[:k] @
 embedding`) against a single preallocated array, not a Python-list `vstack`
@@ -293,13 +296,25 @@ run, checking progress, resuming after a failure).
 
 ## Known limitations
 
-- **Acronym/expansion pairs don't reliably merge in `resolve`**: e.g. "FORC"
-  and "first-order reversal curve" can stay as two separate entities, and
-  even same-concept phrasing can split if it doesn't clear the 0.85 cosine
-  threshold (observed: "convolutional neural network" and "Convolutional
-  Neural Networks" landed as two separate canonical entities in production).
-  Not a crash, a precision gap. `raw_name` on the relationship makes this
-  discoverable/queryable after the fact even when it doesn't merge.
+- **Acronym/expansion pairs don't reliably merge in `resolve` on cosine
+  similarity alone**: e.g. "FORC" and "first-order reversal curve" can stay
+  as two separate entities if they don't clear the 0.85 cosine threshold.
+  `cluster_names()` now has a second-chance acronym-detection fallback for
+  exactly this shape of pair (a short all-caps token vs. a multi-word name
+  whose initials spell it, in either direction — see `_initials`/
+  `_is_acronym_token`/`_acronym_fallback_match`), checked after cosine
+  already fails. **Not yet verified against the real corpus** — unit-tested
+  with a fake embedding model (`tests/test_resolve.py`), but the concrete
+  "rerun `resolve` + `merge`, then `cli.py entities`, confirm merge recall
+  moved off the measured 0%" step from `specs/04-roadmap.md` Near-term #4
+  still needs to happen against live data. This fallback does **not** cover
+  same-concept phrasing that differs only in case/pluralization/word choice
+  (e.g. "convolutional neural network" vs. "Convolutional Neural Networks"
+  landing as two separate canonical entities, still observed in production)
+  — that's a plain cosine-threshold miss, not an acronym/expansion pair, and
+  is unaffected by this fix. Not a crash either way, a precision gap.
+  `raw_name` on the relationship makes both cases discoverable/queryable
+  after the fact even when they don't merge.
 - **Model choice matters a lot for quality.** Small local models (e.g.
   `zephyr:latest`) frequently mistype entities — physical objects/materials
   as "dataset", descriptive phenomena as "method" — especially outside CS.

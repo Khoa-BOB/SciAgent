@@ -7,6 +7,14 @@ class IngestJobCreated(BaseModel):
     job_id: str
     status: str
     record_count: int
+    run_extraction: bool = False
+
+
+class IngestExtractionResult(BaseModel):
+    papers_extracted: int
+    entities_written: int
+    relationships_written: int
+    error: str | None = None
 
 
 class IngestJobResult(BaseModel):
@@ -14,6 +22,7 @@ class IngestJobResult(BaseModel):
     embedded: int
     validation_passed: bool
     validation_violations: dict[str, int] = {}
+    extraction: IngestExtractionResult | None = None
 
 
 class IngestJobStatus(BaseModel):

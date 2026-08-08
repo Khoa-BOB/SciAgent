@@ -86,6 +86,53 @@ without CLI/terminal access) rather than being in the original plan — see
 end, verified manually against a real MinIO/Redis/Neo4j, with the two gaps
 above tracked as explicit follow-up rather than assumed covered.
 
+## Sprint 6 — Optional extraction follow-up + acronym-merge fallback
+
+Closes two gaps identified while reasoning through what happens to a newly
+ingested paper's entities: (1) `/v1/ingest-jobs` had no way to also extract
+entities for the papers it loaded, and (2) even a full manual `resolve` run
+had a measured 0% merge recall on acronym/expansion pairs (`sciagent-KG/specs/04-roadmap.md`
+Near-term #4), so a new paper's "CNN" would never join an existing
+"convolutional neural network" node either way.
+
+- `POST /v1/ingest-jobs` gains an optional `run_extraction` form field
+  (default `false`, never automatic) — see `02-kg-service-architecture.md`
+  §8.4–§8.5 and `03-kg-service-api-spec.md` §8.
+- `kg_service/jobs.py:_run_extraction_followup` — extracts entities for
+  exactly this job's papers, but re-resolves against `sciagent-KG`'s full
+  `data/extraction/shards/` directory (not just the new shard) so new
+  mentions can cluster into already-existing canonical entities, then
+  filters `merge` back down to only this job's rows before writing. A
+  failure here is caught and reported as `result.extraction.error`, never
+  raised — ingestion has already committed by that point.
+- `sciagent-KG/src/extraction/resolve.py`: an acronym-detection fallback in
+  `cluster_names()` (`_initials`/`_is_acronym_token`/`_acronym_fallback_match`)
+  — checked only after cosine similarity already failed, so it's additive,
+  not a change to the existing threshold behavior. Directly targets the
+  measured 0% merge recall on acronym/expansion pairs; verified via
+  `sciagent-KG/tests/test_resolve.py`'s unit tests (fake embedding model,
+  both merge directions, and a negative case proving unrelated names still
+  don't merge) — **not yet re-verified against the real corpus and
+  `src.evaluation.cli entities`'s merge-recall metric**, since that requires
+  a live Neo4j with the real 36k-paper corpus loaded, which this environment
+  doesn't have. Re-running `resolve` + `merge` against the real corpus and
+  re-checking `cli.py entities`'s merge recall (per `04-roadmap.md`'s
+  original Near-term #4 wording) is the concrete next step to close that
+  loop.
+- `sciagent-backend` now depends on `spacy`/`openai`/`tqdm` (transitively
+  needed by `src.extraction.*`); `Dockerfile` downloads `en_core_web_sm` at
+  build time so `kg-worker` can run candidate-phrase extraction.
+
+**Not done yet**:
+- Real-corpus verification of the acronym fallback's merge-recall
+  improvement (see above) — the concrete, cheap, already-specified next step
+  from `04-roadmap.md`.
+- A live integration test for `run_extraction=true` against a real LLM
+  backend, MinIO, Redis, and Neo4j (extends Sprint 5's same gap).
+- No standalone extraction-only endpoint (e.g. `/v1/extraction-jobs`) —
+  extraction is only reachable bundled into an ingest job, per Story 1.8's
+  explicit out-of-scope note in `01-kg-service-requirements.md` §4.
+
 ## Definition of Done (per endpoint)
 
 An endpoint is done only when:

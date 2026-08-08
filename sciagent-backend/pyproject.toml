@@ -14,6 +14,12 @@ dependencies = [
     "minio>=7.2.0",
     "redis>=5.0.0",
     "rq>=1.16.0",
+    # kg-worker's optional run_extraction follow-up imports sciagent-KG's
+    # src.extraction.* modules directly (see kg_service/jobs.py) -- these
+    # three are sciagent-KG dependencies this process now needs too.
+    "spacy>=3.8.14",
+    "openai>=2.53.0",
+    "tqdm>=4.70.0",
 ]
 
 [dependency-groups]

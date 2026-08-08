@@ -337,11 +337,23 @@ object with at least a non-empty `id` field). Validated synchronously; the
 actual ingestion (`schema → load → embed → validate`) runs asynchronously on
 a worker.
 
-**Request**: `multipart/form-data`, field `file`.
+**Request**: `multipart/form-data`.
+
+| Field | Type | Required | Default |
+|---|---|---|---|
+| `file` | file | yes | — |
+| `run_extraction` | bool | no | `false` |
+
+`run_extraction=true` additionally runs entity extraction (`export → extract
+→ resolve → merge`) for exactly the papers this job loads, as part of the
+same job — see architecture doc §8.5 for the full design, including why
+`resolve` runs against the whole existing corpus (not just this upload) and
+the cost/latency tradeoff that implies. Off by default; never triggered
+automatically.
 
 **Response `202`**
 ```json
-{"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "queued", "record_count": 128}
+{"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "queued", "record_count": 128, "run_extraction": false}
 ```
 
 **Errors**:
@@ -362,7 +374,7 @@ Poll job status. `status` is one of RQ's job states (`queued`, `started`,
 {"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "started", "result": null, "error": null}
 ```
 
-**Response `200`** (finished)
+**Response `200`** (finished, `run_extraction=false`)
 ```json
 {
   "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -371,11 +383,38 @@ Poll job status. `status` is one of RQ's job states (`queued`, `started`,
     "loaded": 128,
     "embedded": 128,
     "validation_passed": true,
-    "validation_violations": {}
+    "validation_violations": {},
+    "extraction": null
   },
   "error": null
 }
 ```
+
+**Response `200`** (finished, `run_extraction=true`)
+```json
+{
+  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "finished",
+  "result": {
+    "loaded": 128,
+    "embedded": 128,
+    "validation_passed": true,
+    "validation_violations": {},
+    "extraction": {
+      "papers_extracted": 128,
+      "entities_written": 214,
+      "relationships_written": 361,
+      "error": null
+    }
+  },
+  "error": null
+}
+```
+A non-null `result.extraction.error` (with the ingestion fields still
+populated normally) means extraction failed *after* ingestion already
+succeeded — see architecture doc §8.5's failure-handling note. This is
+distinct from the top-level `status: "failed"` / `error` below, which means
+the job itself (ingestion) failed.
 
 **Response `200`** (failed)
 ```json
@@ -383,9 +422,6 @@ Poll job status. `status` is one of RQ's job states (`queued`, `started`,
 ```
 
 **Errors**: `404 INGEST_JOB_NOT_FOUND`.
-
-Note: entity extraction (Method/Dataset/ResearchTopic) is not triggered by
-this endpoint — see architecture doc §8.4.
 
 ---
 

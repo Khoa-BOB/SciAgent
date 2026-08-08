@@ -5,6 +5,7 @@ functions (apply_schema/load_metadata/run_embedding/run_validation), so this
 runs without live Neo4j/MinIO/Redis or downloading the embedding model.
 """
 
+import json
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -103,3 +104,142 @@ def test_write_driver_requires_env_vars(monkeypatch: pytest.MonkeyPatch) -> None
 
     with pytest.raises(EnvironmentError):
         jobs._write_driver()
+
+
+# --- Extraction follow-up (run_extraction=True) -----------------------------
+
+
+def test_build_extraction_shard_filters_incomplete_records(tmp_path) -> None:
+    upload_path = tmp_path / "upload.jsonl"
+    upload_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "2401.00001", "title": "T1", "abstract": "A1"}),
+                json.dumps({"id": "2401.00002", "title": "", "abstract": "A2"}),  # blank title -> excluded
+                json.dumps({"id": "", "title": "T3", "abstract": "A3"}),  # blank id -> excluded
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "shard.jsonl"
+
+    arxiv_ids = jobs._build_extraction_shard(upload_path, output_path)
+
+    assert arxiv_ids == ["2401.00001"]
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"arxiv_id": "2401.00001", "title": "T1", "abstract": "A1"}
+
+
+def test_run_extraction_followup_skips_when_no_eligible_papers(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr("src.extraction.export.DEFAULT_OUTPUT_DIR", tmp_path / "shards")
+
+    upload_path = tmp_path / "upload.jsonl"
+    upload_path.write_text(json.dumps({"id": "2401.00001", "title": "", "abstract": ""}) + "\n", encoding="utf-8")
+
+    result = jobs._run_extraction_followup(upload_path, MagicMock())
+
+    assert result == {"papers_extracted": 0, "entities_written": 0, "relationships_written": 0}
+
+
+def test_run_extraction_followup_resolves_against_full_corpus_but_merges_only_job_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    shards_dir = tmp_path / "shards"
+    monkeypatch.setattr("src.extraction.export.DEFAULT_OUTPUT_DIR", shards_dir)
+    monkeypatch.setattr(jobs, "_get_extraction_client", lambda: MagicMock())
+    monkeypatch.setattr("src.extraction.extract.run_extraction", MagicMock(return_value=2))
+
+    # resolve() is mocked to return rows spanning both this job's new papers
+    # and an already-existing paper from a previous job/corpus -- the whole
+    # point of resolving against the full shards dir -- to prove merge only
+    # writes back the new job's rows, not the entire corpus every time.
+    resolved_rows = [
+        {"paper_id": "2401.00001", "entity_type": "method", "name": "graph neural network", "normalized_name": "graph neural network", "raw_name": "GNN"},
+        {"paper_id": "2401.00002", "entity_type": "method", "name": "graph neural network", "normalized_name": "graph neural network", "raw_name": "graph neural network"},
+        {"paper_id": "9999.00000", "entity_type": "method", "name": "unrelated pre-existing entity", "normalized_name": "unrelated pre-existing entity", "raw_name": "..."},
+    ]
+    monkeypatch.setattr("src.extraction.resolve.resolve", MagicMock(return_value=resolved_rows))
+
+    fake_merge = MagicMock(return_value=(1, 2))
+    monkeypatch.setattr("src.extraction.merge.merge_resolved", fake_merge)
+
+    upload_path = tmp_path / "upload.jsonl"
+    upload_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "2401.00001", "title": "T1", "abstract": "A1"}),
+                json.dumps({"id": "2401.00002", "title": "T2", "abstract": "A2"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    driver = MagicMock()
+    result = jobs._run_extraction_followup(upload_path, driver)
+
+    assert result == {"papers_extracted": 2, "entities_written": 1, "relationships_written": 2}
+    fake_merge.assert_called_once()
+    merged_driver, _database, merged_rows = fake_merge.call_args.args
+    assert merged_driver is driver
+    assert {row["paper_id"] for row in merged_rows} == {"2401.00001", "2401.00002"}
+
+
+def test_run_ingest_job_with_extraction_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jobs, "get_minio_client", lambda: MagicMock())
+    fake_driver = MagicMock()
+    monkeypatch.setattr(jobs, "_write_driver", lambda: fake_driver)
+    monkeypatch.setattr(jobs, "_get_embedding_model", lambda: object())
+    monkeypatch.setattr("src.ingestion.schema.apply_schema", MagicMock())
+    monkeypatch.setattr("src.ingestion.load_metadata.load_metadata", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.embeddings.index_papers.run_embedding", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.validate.run_validation", MagicMock(return_value=[]))
+
+    fake_followup = MagicMock(
+        return_value={"papers_extracted": 1, "entities_written": 2, "relationships_written": 2}
+    )
+    monkeypatch.setattr(jobs, "_run_extraction_followup", fake_followup)
+
+    result = jobs.run_ingest_job("ingest-uploads/job-4/papers.jsonl", run_extraction=True)
+
+    fake_followup.assert_called_once()
+    assert result["extraction"] == {"papers_extracted": 1, "entities_written": 2, "relationships_written": 2}
+
+
+def test_run_ingest_job_extraction_failure_does_not_fail_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jobs, "get_minio_client", lambda: MagicMock())
+    fake_driver = MagicMock()
+    monkeypatch.setattr(jobs, "_write_driver", lambda: fake_driver)
+    monkeypatch.setattr(jobs, "_get_embedding_model", lambda: object())
+    monkeypatch.setattr("src.ingestion.schema.apply_schema", MagicMock())
+    monkeypatch.setattr("src.ingestion.load_metadata.load_metadata", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.embeddings.index_papers.run_embedding", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.validate.run_validation", MagicMock(return_value=[]))
+    monkeypatch.setattr(
+        jobs, "_run_extraction_followup", MagicMock(side_effect=RuntimeError("llm backend unreachable"))
+    )
+
+    result = jobs.run_ingest_job("ingest-uploads/job-5/papers.jsonl", run_extraction=True)
+
+    assert result["loaded"] == 1  # ingestion is still reported as successful
+    assert result["extraction"]["error"] == "llm backend unreachable"
+    fake_driver.close.assert_called_once()
+
+
+def test_run_ingest_job_without_extraction_flag_skips_followup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jobs, "get_minio_client", lambda: MagicMock())
+    monkeypatch.setattr(jobs, "_write_driver", lambda: MagicMock())
+    monkeypatch.setattr(jobs, "_get_embedding_model", lambda: object())
+    monkeypatch.setattr("src.ingestion.schema.apply_schema", MagicMock())
+    monkeypatch.setattr("src.ingestion.load_metadata.load_metadata", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.embeddings.index_papers.run_embedding", MagicMock(return_value=1))
+    monkeypatch.setattr("src.ingestion.validate.run_validation", MagicMock(return_value=[]))
+
+    fake_followup = MagicMock()
+    monkeypatch.setattr(jobs, "_run_extraction_followup", fake_followup)
+
+    result = jobs.run_ingest_job("ingest-uploads/job-6/papers.jsonl")
+
+    fake_followup.assert_not_called()
+    assert "extraction" not in result

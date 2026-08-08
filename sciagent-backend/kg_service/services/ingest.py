@@ -65,7 +65,7 @@ def _ensure_bucket(minio_client) -> None:
         ) from error
 
 
-def create_ingest_job(filename: str, content: bytes) -> IngestJobCreated:
+def create_ingest_job(filename: str, content: bytes, run_extraction: bool = False) -> IngestJobCreated:
     if len(content) > MAX_INGEST_FILE_BYTES:
         raise ApiError(
             413,
@@ -92,13 +92,13 @@ def create_ingest_job(filename: str, content: bytes) -> IngestJobCreated:
     try:
         from kg_service.jobs import run_ingest_job
 
-        get_ingest_queue().enqueue(run_ingest_job, object_key, job_id=job_id, job_timeout="6h")
+        get_ingest_queue().enqueue(run_ingest_job, object_key, run_extraction, job_id=job_id, job_timeout="6h")
     except Exception as error:
         raise ApiError(
             503, ErrorCode.INGEST_QUEUE_UNAVAILABLE, "Failed to enqueue ingest job (Redis unreachable)."
         ) from error
 
-    return IngestJobCreated(job_id=job_id, status="queued", record_count=record_count)
+    return IngestJobCreated(job_id=job_id, status="queued", record_count=record_count, run_extraction=run_extraction)
 
 
 def get_ingest_job_status(job_id: str) -> IngestJobStatus:
