@@ -1,0 +1,64 @@
+# Local/staging serving stack: Neo4j + the KG Service read API.
+#
+# Data-pipeline steps (ingestion, extraction) are NOT part of this compose
+# file on purpose -- they're one-off/long-running uv CLI jobs (see README.md
+# section 4-5), not services. Bring up `neo4j` first, run the pipeline
+# against it from the host (bolt://localhost:7687), then bring up
+# `kg-service` once the graph actually has data.
+#
+# Don't run this alongside sciagent-KG/docker-compose.yaml -- both claim
+# ports 7474/7687.
+
+services:
+  neo4j:
+    image: neo4j:latest
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - devops_neo4j_data:/data
+      - devops_neo4j_logs:/logs
+      - devops_neo4j_import:/import
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}"
+      # Also exposed plain so the healthcheck below can read it at container
+      # runtime (via $$, i.e. not compose-interpolated) -- no extra exposure
+      # beyond what NEO4J_AUTH above already reveals to `docker inspect`.
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u ${NEO4J_USERNAME:-neo4j} -p $${NEO4J_PASSWORD} 'RETURN 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  kg-service:
+    build:
+      context: ..
+      dockerfile: sciagent-backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      # Same account as the `neo4j` service above -- an accepted dev-only
+      # shortcut, see README.md section 7. In a real deployment, point these
+      # two at a separate read-only credential instead (requires Neo4j
+      # Enterprise/Aura -- Community can't create a second real role).
+      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}"
+      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
+      KG_SERVICE_ALLOWED_KEYS: "${KG_SERVICE_ALLOWED_KEYS:?set at least one caller key in .env}"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  devops_neo4j_data:
+  devops_neo4j_logs:
+  devops_neo4j_import:
