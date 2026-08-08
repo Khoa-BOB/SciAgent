@@ -1,7 +1,7 @@
 """specs/03-kg-service-api-spec.md §6, specs/05-kg-service-roadmap.md Sprint 3.
 
 Wired to the new corpus-stats query in sciagent-KG's queries/stats.py --
-see specs/02-kg-service-architecture.md §8.
+see specs/02-kg-service-architecture.md §9.
 """
 
 import kg_service.kg_path  # noqa: F401  -- must run before importing sciagent-KG modules

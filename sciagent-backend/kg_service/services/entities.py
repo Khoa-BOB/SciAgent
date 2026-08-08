@@ -6,7 +6,7 @@ queries/entities.py -- entities-for-paper, list-entities, and
 papers-for-entity, parameterized by the same fixed ENTITY_LABELS/
 RELATION_TYPES dicts the upsert templates already use (never a
 caller-supplied string built into Cypher). See
-specs/02-kg-service-architecture.md §8.
+specs/02-kg-service-architecture.md §9.
 """
 
 import kg_service.kg_path  # noqa: F401  -- must run before importing sciagent-KG modules

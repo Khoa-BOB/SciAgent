@@ -12,6 +12,7 @@ Unlike `sciagent-backend`, there's no other service calling in — the
 | KG maintainer (scaling the corpus) | Load a new/larger arXiv snapshot without corrupting or duplicating existing data |
 | KG maintainer (extending entity coverage) | Run/resume domain-entity extraction against whatever backend (local/HPC/OpenAI) is available and affordable |
 | Downstream consumer (`sciagent-backend`, evaluation tooling) | A graph that matches the documented schema exactly, so their queries don't silently break |
+| `sciagent-backend`'s ingest worker (`/v1/ingest-jobs`, see `sciagent-backend/specs/02-kg-service-architecture.md` §8) | Calls `apply_schema`/`load_metadata`/`run_embedding`/`run_validation` directly as a library (not the CLI, not a subprocess) — needs those function signatures to stay stable, same as any other importer of this project's code |
 | Anyone debugging data quality | A way to check the graph is internally consistent (every paper has a category, no orphaned relationships, etc.) |
 
 ## 2. Ingestion — user stories

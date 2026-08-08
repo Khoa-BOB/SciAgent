@@ -13,10 +13,13 @@ This is a *sibling* codebase to `sciagent-KG`, not a replacement for it:
 - `sciagent-KG` owns ingestion, extraction, and the graph schema — offline,
   batch, write-heavy work (see `sciagent-KG/README.md`,
   `sciagent-KG/docs/graph_schema.md`).
-- `sciagent-backend` owns *read* access to that graph over HTTP — online,
-  request/response, read-only from the API's point of view. It imports
-  `sciagent-KG`'s query builders and retrieval modules (`queries/`,
-  `src/retrieval/`) as a library rather than duplicating Cypher.
+- `sciagent-backend` owns access to that graph over HTTP — almost entirely
+  read-only, online, request/response. It imports `sciagent-KG`'s query
+  builders and retrieval modules (`queries/`, `src/retrieval/`) as a library
+  rather than duplicating Cypher. The one exception, `/v1/ingest-jobs`, adds
+  new papers by asynchronously re-triggering `sciagent-KG`'s own ingestion
+  CLI functions rather than owning a competing write path (§8 of the
+  architecture doc).
 
 The broader product vision (web app, conversational agent, MCP tools,
 citations, streaming) is described in `spec/sciagent_webapp_agent_spec.md`.
@@ -72,21 +75,28 @@ service's contract doesn't accidentally paint these into a corner.
 
 | Service | Depends on | Responsibility |
 |---|---|---|
-| **KG Service** (this spec set) | Neo4j | Read-only HTTP access to papers, search, graph expansion, domain entities |
+| **KG Service** (this spec set) | Neo4j, MinIO, Redis | Read-only HTTP access to papers, search, graph expansion, domain entities, plus one write path: `/v1/ingest-jobs` (§8 of the architecture doc) |
 | Retrieval/MCP Service | KG Service | Wraps KG Service (+ reranking) as MCP tools for the agent |
 | Agent Orchestrator | Retrieval/MCP Service | Intent routing, evidence fusion, citation generation, streaming |
 | BFF | Agent Orchestrator, App DB | Auth, conversations, collections, SSE, rate limiting (owns the user-facing contract in `spec/sciagent_webapp_agent_spec.md` §6) |
-| Ingestion/Extraction control plane (optional) | sciagent-KG | Trigger/monitor ingestion and entity-extraction jobs from an API instead of the CLI, if/when that's needed |
+| Extraction control plane (optional) | sciagent-KG | Trigger/monitor entity-extraction jobs from an API instead of the CLI, if/when that's needed — ingestion's own control plane shipped as part of the KG Service itself (§8) rather than as a separate service, since it's a thin trigger over `sciagent-KG`'s existing functions, not a new domain |
 
 ## Non-goals for the KG Service specifically
 
-- **No write endpoints.** Ingestion (`src/ingestion/`) and entity extraction
-  (`src/extraction/`) remain offline batch jobs run via the existing CLIs.
-  The KG Service never mutates the graph — this keeps its blast radius small
-  and its caching story simple (read replicas, no invalidation-on-write
-  ordering to reason about).
+- **Almost entirely read-only.** Every endpoint except `/v1/ingest-jobs`
+  (§8 of `02-kg-service-architecture.md`) is read-only and never mutates the
+  graph — this keeps its blast radius small and its caching story simple
+  (read replicas, no invalidation-on-write ordering to reason about) for the
+  vast majority of its surface. `/v1/ingest-jobs` is a deliberate, narrowly
+  scoped exception: it re-triggers `sciagent-KG`'s existing ingestion CLI
+  functions asynchronously via a separate worker process holding its own
+  write credential — the API process itself still never touches Neo4j with
+  write intent. Entity extraction (`src/extraction/`) has no such path and
+  remains an offline batch job run via the existing CLI.
 - **No user identity or authorization.** That belongs to the BFF. The KG
-  Service authenticates *callers* (other backend services), not end users.
+  Service authenticates *callers* (other backend services), not end users —
+  including for `/v1/ingest-jobs`, which is gated by a separate service-key
+  allowlist, not a per-user permission.
 - **No LLM calls.** Embedding the *query* text for semantic search is the one
   ML-model call this service makes (`sentence-transformers`, already used by
   `src/retrieval/vector_search.py`); it never calls a chat/completion model.

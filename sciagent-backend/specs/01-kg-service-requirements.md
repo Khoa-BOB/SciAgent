@@ -28,6 +28,7 @@ its callers are other backend services:
 | BFF (paper detail pages, search UI) | Paper lookup, related papers, entity browsing |
 | Evaluation tooling (`src/evaluation/`) | Same search/expansion endpoints, called in bulk against an eval dataset |
 | Internal ops / debugging | Health, readiness, corpus stats |
+| KG maintainer / frontend upload flow | Add new papers to the graph without a terminal — Story 1.8, `02-kg-service-architecture.md` §8 |
 
 ## 3. User stories
 
@@ -131,9 +132,31 @@ and sanity-check corpus size after an ingestion/extraction run.
 - `/v1/stats` returns paper count, entity counts by type, and last-updated
   timestamp if available — read-only, no auth beyond service-to-service.
 
+### Story 1.8 — Add new papers without the CLI
+
+**As a KG maintainer (or a frontend upload flow acting on their behalf),** I
+want to upload a metadata file and have it ingested into the graph, **so
+that** growing the corpus doesn't require terminal access to `sciagent-KG`.
+
+**Acceptance criteria**
+- `POST /v1/ingest-jobs` accepts a JSONL upload, validates it synchronously
+  (so a malformed file fails in the same request, not silently later), and
+  returns a job ID immediately — ingestion itself runs asynchronously.
+- `GET /v1/ingest-jobs/{job_id}` reports status and, on success, counts
+  (papers loaded, embedded, validation violations).
+- Reuses `sciagent-KG`'s existing idempotent `load_metadata`/`run_embedding`
+  functions exactly — re-uploading a file with papers already in the graph
+  doesn't create duplicates (same `MERGE`-on-`arxiv_id` guarantee as Story
+  1.1 in `sciagent-KG/specs/01-requirements.md`).
+- Gated by a separate, write-scoped credential/key from every read endpoint
+  above — see `02-kg-service-architecture.md` §8.
+- Does **not** trigger entity extraction — that stays a deliberate, separate
+  step (§8.4 of the architecture doc).
+
 ## 4. Explicitly out of scope for v1
 
-- Any write/mutate endpoint (ingestion and extraction stay CLI-driven).
+- Any write/mutate endpoint beyond `/v1/ingest-jobs` (Story 1.8) — entity
+  extraction in particular stays CLI-driven; see architecture doc §8.4.
 - Pagination cursors beyond simple `limit`/`offset` (deferred until a caller
   needs to page through more than one bounded result page).
 - Combined multi-filter search (author + category + year in one call).

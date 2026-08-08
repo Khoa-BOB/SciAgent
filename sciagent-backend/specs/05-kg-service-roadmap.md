@@ -36,7 +36,7 @@ covered by a passing integration test.
   (additive only, per architecture doc §8).
 - `GET /v1/stats`
 
-**Exit**: full endpoint summary (API spec §8) is implemented and integration
+**Exit**: full endpoint summary (API spec §9) is implemented and integration
 tested.
 
 ## Sprint 4 — Hardening and production readiness
@@ -53,6 +53,38 @@ tested.
   failures.
 
 **Exit**: matches the exit criteria in `04-kg-service-nfr-testing-deployment.md` §7.
+
+## Sprint 5 — Ingestion write path (`/v1/ingest-jobs`)
+
+Added after Sprint 4, in response to a concrete need (adding new papers
+without CLI/terminal access) rather than being in the original plan — see
+`01-kg-service-requirements.md` Story 1.8 and `02-kg-service-architecture.md`
+§8 for the full design.
+
+- `POST /v1/ingest-jobs` (upload + validate + stage to MinIO + enqueue),
+  `GET /v1/ingest-jobs/{job_id}` (poll status) — both gated by a separate
+  `KG_SERVICE_WRITE_ALLOWED_KEYS` allowlist.
+- `kg_service/jobs.py` + `kg_service/worker.py` — a separate worker
+  process holding the one read-write Neo4j credential in this codebase
+  besides `sciagent-KG`'s own CLIs, built from `KG_WRITE_NEO4J_*` env vars
+  the API process never reads.
+- `docker-compose.yml` (repo root) wiring `minio`, `redis`, `kg-service`,
+  `kg-worker`.
+- Unit tests for auth, upload validation, MinIO/Redis failure handling, and
+  the worker task (`tests/unit/test_write_auth.py`,
+  `test_ingest_service.py`, `test_jobs.py`) — all mocked, no live
+  MinIO/Redis/Neo4j.
+
+**Not done yet** (see NFR doc §5, §7):
+- A live integration test exercising the full upload → worker → status
+  round trip against real MinIO/Redis/Neo4j.
+- Load testing `POST /v1/ingest-jobs`'s synchronous path (§1 of the NFR doc
+  sets a target but it hasn't been measured).
+- A frontend upload UI — this sprint is the API only.
+
+**Exit**: a live deployment can add papers via `POST /v1/ingest-jobs` end to
+end, verified manually against a real MinIO/Redis/Neo4j, with the two gaps
+above tracked as explicit follow-up rather than assumed covered.
 
 ## Definition of Done (per endpoint)
 

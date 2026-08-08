@@ -14,6 +14,8 @@ Phases 2 (design), 4 (verification), and 5 (deployment) of the backend SDLC
 | `/v1/stats` | < 200ms | Aggregate counts; consider a cached/materialized value if corpus growth makes `count(*)` slow (not needed at current ~36k-paper scale) |
 | `/healthz` | < 10ms | No I/O |
 | `/readyz` | < 50ms | One trivial Neo4j round-trip |
+| `POST /v1/ingest-jobs` | < 500ms | Validation (in-memory JSONL scan) + one MinIO `put_object` + one Redis `enqueue` — the target covers only this synchronous part; the ingestion job itself runs on the worker and has no request-latency target (see §6.1) |
+| `GET /v1/ingest-jobs/{id}` | < 50ms | One Redis `Job.fetch` |
 
 Targets are p95 under the load profile in §5. Re-baseline after the corpus
 materially grows past current scale (~36k papers, ~4-5k domain entities).
@@ -56,6 +58,18 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
   logs only.
 - **Dependency scanning** in CI (same as the broader product spec's CI
   pipeline, §5 Deployment Requirements in `spec/sciagent_webapp_agent_spec.md`).
+- **Write-path credential isolation** (`/v1/ingest-jobs`, architecture doc
+  §8.2). The API process (`kg_service.main:app`) is never given
+  `KG_WRITE_NEO4J_*` — only the separate ingest worker process
+  (`kg_service.worker`) is. This is enforced by which container/process
+  receives which env vars in deployment (§6.1), not by application code
+  alone, so a bug in `kg_service.main` cannot leak into a write. `/v1/ingest-jobs`
+  is additionally gated by its own `KG_SERVICE_WRITE_ALLOWED_KEYS` allowlist,
+  disjoint from `KG_SERVICE_ALLOWED_KEYS`.
+- **MinIO/Redis are not a new external attack surface for the read path** —
+  neither is reachable from, or referenced by, any read endpoint. Only
+  `create_ingest_job`/`get_ingest_job_status` (`kg_service/services/ingest.py`)
+  and the worker (`kg_service/jobs.py`) touch them.
 
 ## 4. Reliability
 
@@ -86,6 +100,15 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
 - Error-shape consistency: every error path returns the `{"error": {...}}`
   shape from the architecture doc, asserted once as a shared test helper
   used across all endpoint tests.
+- Write path (`tests/unit/test_write_auth.py`, `test_ingest_service.py`,
+  `test_jobs.py`): `require_write_service_key` rejects a key that's only in
+  the read allowlist; upload validation rejects oversized/empty/malformed/
+  missing-`id` files without ever calling MinIO; `create_ingest_job` maps a
+  MinIO/Redis failure to `INGEST_STORAGE_UNAVAILABLE`/`INGEST_QUEUE_UNAVAILABLE`
+  rather than a bare 500; `run_ingest_job` (the worker task) calls
+  `apply_schema`/`load_metadata`/`run_embedding`/`run_validation` with the
+  worker's own driver and always closes it, including on failure. All mocked
+  — no live Neo4j/MinIO/Redis required.
 
 ### Integration tests
 
@@ -100,6 +123,12 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
   connection in a test and assert it's rejected at the database level, not
   just "the code doesn't expose a write endpoint" — catches a future
   accidental write endpoint or a misconfigured credential.
+- **Not yet built**: a full `/v1/ingest-jobs` round trip against live
+  MinIO/Redis/Neo4j (upload → worker picks up the job → `GET` reflects
+  `finished` with correct counts). Current coverage is unit-level only
+  (mocked MinIO/Redis/pipeline functions, see §5 Unit tests) — flagged here
+  rather than assumed covered, same convention as `05-kg-service-roadmap.md`'s
+  Definition of Done.
 
 ### Contract tests
 
@@ -137,9 +166,34 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
   tests against a disposable Neo4j test container, dependency scan, build
   the image.
 - **CD pipeline** (main branch): build versioned image → deploy to staging →
-  smoke test the endpoint summary list (§8 of the API spec) → manual/auto
+  smoke test the endpoint summary list (§9 of the API spec) → manual/auto
   promote to production → rolling deploy → automatic rollback on failed
   `/readyz` post-deploy.
+
+### 6.1 Write-path deployment: the ingest worker, MinIO, Redis
+
+`/v1/ingest-jobs` (architecture doc §8) needs three extra pieces beyond the
+API container, wired together in the root `docker-compose.yml`:
+
+- **`kg-service`** — the same image/Dockerfile as every other section above,
+  unchanged command. Its env includes `KG_SERVICE_WRITE_ALLOWED_KEYS`,
+  `MINIO_*`, `REDIS_URL` — but **not** `KG_WRITE_NEO4J_*`.
+- **`kg-worker`** — the *same* image, different command
+  (`uv run python -m kg_service.worker`) and a different env file
+  (`sciagent-backend/.env.worker`, not `.env`) containing `KG_WRITE_NEO4J_*`,
+  `MINIO_*`, `REDIS_URL` — but no `KG_SERVICE_ALLOWED_KEYS`/`NEO4J_*`
+  read-only creds, since it never serves a read request. Scale this
+  independently of `kg-service` replica count — it's CPU-bound (embedding)
+  and I/O-bound (Neo4j writes), not request-concurrency-bound.
+- **`minio`** — S3-compatible object storage for staged uploads. Not
+  exposed to any caller outside this deployment; only `kg-service` (PUTs)
+  and `kg-worker` (GETs) talk to it.
+- **`redis`** — the RQ job queue backing store. Same access pattern: only
+  `kg-service` (enqueues) and `kg-worker` (dequeues/executes) talk to it.
+
+None of the four require Neo4j itself to run in the same compose file —
+`NEO4J_URI`/`KG_WRITE_NEO4J_URI` point at wherever the graph already lives
+(local, staging, or production Neo4j), same as every other section here.
 
 ## 7. Exit criteria for this phase
 
@@ -147,6 +201,10 @@ materially grows past current scale (~36k papers, ~4-5k domain entities).
   graph.
 - Read-only credential enforcement is verified by a test, not just asserted
   in prose.
+- The write-path's credential isolation (only `kg-worker` ever receives
+  `KG_WRITE_NEO4J_*`) and separate service-key allowlist are verified by a
+  live `/v1/ingest-jobs` integration test against MinIO/Redis/Neo4j (§5's
+  "Not yet built" gap), not just the current unit-level mocks.
 - Load test results confirm the p95 targets in §1 hold at expected launch
   traffic (initial target: enough headroom for the Retrieval/MCP Service and
   BFF combined, sized once those services' expected call volume is known —

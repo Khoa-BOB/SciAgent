@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from kg_service.deps import close_driver
 from kg_service.errors import register_error_handlers
-from kg_service.routers import entities, graph, health, papers, search, stats
+from kg_service.routers import entities, graph, health, ingest, papers, search, stats
 
 
 @asynccontextmanager
@@ -22,7 +22,10 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="SciAgent KG Service",
         version="1.0.0",
-        description="Read-only HTTP access to the SciAgent knowledge graph -- see specs/.",
+        description=(
+            "HTTP access to the SciAgent knowledge graph -- read-only except for "
+            "/v1/ingest-jobs, a separately-authenticated write path. See specs/."
+        ),
         lifespan=lifespan,
     )
     register_error_handlers(app)
@@ -33,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(graph.router)
     app.include_router(entities.router)
     app.include_router(stats.router)
+    app.include_router(ingest.router)
 
     return app
 

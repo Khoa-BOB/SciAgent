@@ -6,6 +6,10 @@ for conventions (versioning, error shape, list-response shape) that apply to
 every endpoint below without being repeated per-endpoint.
 
 Base path: `/v1`. All endpoints require `X-Service-Key` unless marked public.
+§8's `/v1/ingest-jobs` endpoints require a **separate, write-scoped**
+`X-Service-Key` (checked against `KG_SERVICE_WRITE_ALLOWED_KEYS`, not the
+`KG_SERVICE_ALLOWED_KEYS` every other endpoint below uses) — see architecture
+doc §8.2.
 
 ---
 
@@ -317,7 +321,75 @@ was built).
 
 ---
 
-## 8. Endpoint summary
+## 8. Ingestion (write path)
+
+Everything above this section is read-only. These two endpoints are the
+exception — gated by the separate, write-scoped key described at the top of
+this document. A key valid for every read endpoint above is not
+automatically valid here. See architecture doc §8 for the full design
+(job queue, credential boundary, upload validation).
+
+### `POST /v1/ingest-jobs`
+
+Upload a JSONL file of new/updated arXiv-style paper metadata — same shape
+`sciagent-KG/src/ingestion/transform.py` already expects (each line a JSON
+object with at least a non-empty `id` field). Validated synchronously; the
+actual ingestion (`schema → load → embed → validate`) runs asynchronously on
+a worker.
+
+**Request**: `multipart/form-data`, field `file`.
+
+**Response `202`**
+```json
+{"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "queued", "record_count": 128}
+```
+
+**Errors**:
+- `413 INGEST_FILE_TOO_LARGE` — exceeds `MAX_INGEST_FILE_BYTES` (default 200MB).
+- `422 INGEST_FILE_EMPTY` — file has no non-blank lines.
+- `422 INGEST_FILE_INVALID_JSONL` — a line isn't valid JSON, isn't an object,
+  or is missing a non-empty `id` field.
+- `503 INGEST_STORAGE_UNAVAILABLE` — MinIO unreachable.
+- `503 INGEST_QUEUE_UNAVAILABLE` — Redis unreachable.
+
+### `GET /v1/ingest-jobs/{job_id}`
+
+Poll job status. `status` is one of RQ's job states (`queued`, `started`,
+`finished`, `failed`, ...).
+
+**Response `200`** (queued/running)
+```json
+{"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "started", "result": null, "error": null}
+```
+
+**Response `200`** (finished)
+```json
+{
+  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "finished",
+  "result": {
+    "loaded": 128,
+    "embedded": 128,
+    "validation_passed": true,
+    "validation_violations": {}
+  },
+  "error": null
+}
+```
+
+**Response `200`** (failed)
+```json
+{"job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "status": "failed", "result": null, "error": "Traceback (most recent call last): ..."}
+```
+
+**Errors**: `404 INGEST_JOB_NOT_FOUND`.
+
+Note: entity extraction (Method/Dataset/ResearchTopic) is not triggered by
+this endpoint — see architecture doc §8.4.
+
+---
+
+## 9. Endpoint summary
 
 ```text
 GET  /healthz
@@ -335,8 +407,12 @@ POST /v1/graph/expand
 GET  /v1/entities/{entity_type}
 GET  /v1/entities/{entity_type}/{normalized_name}/papers
 GET  /v1/stats
+POST /v1/ingest-jobs                 -- write-scoped key, see §8
+GET  /v1/ingest-jobs/{job_id}        -- write-scoped key, see §8
 ```
 
-Every one of these maps to an existing class/query in `sciagent-KG` (§8 of
-the architecture doc lists the two small additive exceptions: entity
-reverse-lookup queries and the stats query).
+Every read endpoint above maps to an existing class/query in `sciagent-KG`
+(§9 of the architecture doc lists the two small additive exceptions: entity
+reverse-lookup queries and the stats query). The two ingestion endpoints map
+to `sciagent-KG`'s existing ingestion CLI functions, orchestrated rather than
+reimplemented (architecture doc §8.1).

@@ -1,0 +1,76 @@
+# Runs the KG Service's write path locally: MinIO stages uploaded ingest
+# files, Redis/RQ hands them off to a worker that holds the read-write Neo4j
+# credential -- see sciagent-backend/specs/02-kg-service-architecture.md §8.
+#
+# Does NOT run Neo4j itself -- point NEO4J_URI / KG_WRITE_NEO4J_URI in the
+# env files below at wherever the graph already lives.
+#
+# Usage:
+#   cp sciagent-backend/.env.example sciagent-backend/.env
+#   cp sciagent-backend/.env.worker.example sciagent-backend/.env.worker
+#   # fill in NEO4J_*, KG_WRITE_NEO4J_*, MINIO_ACCESS_KEY/SECRET_KEY, allowlists
+#   docker compose up --build
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kg-service:
+    build:
+      context: .
+      dockerfile: sciagent-backend/Dockerfile
+    env_file:
+      - sciagent-backend/.env
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  kg-worker:
+    build:
+      context: .
+      dockerfile: sciagent-backend/Dockerfile
+    command: ["uv", "run", "python", "-m", "kg_service.worker"]
+    env_file:
+      - sciagent-backend/.env.worker
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  minio-data:

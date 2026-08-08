@@ -67,7 +67,12 @@ by extraction), and the same schema-application entrypoint pattern
 
 - **No HTTP/API surface.** That's `sciagent-backend`'s job entirely — this
   project's only consumers are its own CLIs and whatever schedules them
-  (a human, a cron job, an HPC array job).
+  (a human, a cron job, an HPC array job). This still holds even now that
+  `sciagent-backend` has an ingestion write path (`/v1/ingest-jobs`, see
+  `sciagent-backend/specs/02-kg-service-architecture.md` §8): that endpoint's
+  worker process calls `src/ingestion/`'s existing functions directly, the
+  same way the CLI does — it's a new *caller* of this project's code, not a
+  new interface added to this project.
 - **No agent/LLM-facing retrieval logic beyond what's needed to build the
   graph.** `src/retrieval/` exists here today (semantic search, graph
   expansion) because it was built before `sciagent-backend` existed — see

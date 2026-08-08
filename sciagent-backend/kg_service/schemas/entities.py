@@ -1,7 +1,7 @@
 """specs/03-kg-service-api-spec.md §5. entity_type must be one of
 ENTITY_TYPES -- validated against this fixed set before it ever reaches a
 Cypher query, same safety pattern as sciagent-KG/queries/entities.py's
-ENTITY_LABELS dict (specs/02-kg-service-architecture.md §8).
+ENTITY_LABELS dict (specs/02-kg-service-architecture.md §9).
 """
 
 from pydantic import BaseModel

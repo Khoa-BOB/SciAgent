@@ -10,6 +10,12 @@ loads the SentenceTransformer embedding model (google/embeddinggemma-300m)
 -- reloading that per request would be the dominant cost of every semantic
 search call, not the Neo4j query. See specs/02-kg-service-architecture.md
 §3 and specs/04-kg-service-nfr-testing-deployment.md §1.
+
+Also holds the MinIO/Redis clients used by the /v1/ingest-jobs write path
+(specs/02-kg-service-architecture.md §8). These are read/enqueue-only from
+this process -- the driver that actually gets to WRITE Neo4j lives in
+kg_service.jobs, built from separate KG_WRITE_NEO4J_* env vars this
+process never reads. See get_driver() above vs kg_service/jobs.py.
 """
 
 from functools import lru_cache
@@ -17,7 +23,17 @@ from functools import lru_cache
 import kg_service.kg_path  # noqa: F401  -- must run before importing sciagent-KG modules
 from neo4j import Driver, GraphDatabase
 
-from kg_service.config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USERNAME, validate_config
+from kg_service.config import (
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MINIO_SECURE,
+    NEO4J_PASSWORD,
+    NEO4J_URI,
+    NEO4J_USERNAME,
+    REDIS_URL,
+    validate_config,
+)
 
 
 @lru_cache(maxsize=1)
@@ -51,6 +67,32 @@ def get_graph_expander():
     expander = GraphExpander()
     expander.driver = get_driver()
     return expander
+
+
+@lru_cache(maxsize=1)
+def get_minio_client():
+    from minio import Minio
+
+    return Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=MINIO_SECURE,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_redis_conn():
+    from redis import Redis
+
+    return Redis.from_url(REDIS_URL)
+
+
+@lru_cache(maxsize=1)
+def get_ingest_queue():
+    from rq import Queue
+
+    return Queue("ingest", connection=get_redis_conn())
 
 
 def close_driver() -> None:

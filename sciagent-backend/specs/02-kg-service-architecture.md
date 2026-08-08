@@ -133,7 +133,101 @@ Not built in v1. When it is:
   Redis keyed by request), not inside the Neo4j query layer — keeps
   `sciagent-KG`'s query modules cache-agnostic.
 
-## 8. What changes in `sciagent-KG` to support this
+## 8. Write path: `/v1/ingest-jobs` (ingestion control plane)
+
+Everything above this section describes the read-only KG Service. `/v1/ingest-jobs`
+is the one exception: an authenticated, asynchronous way to add new papers to
+the graph without shelling into `sciagent-KG`'s CLI by hand. It answers Story
+1.8 in [`01-kg-service-requirements.md`](01-kg-service-requirements.md), and it
+does not weaken the read/write boundary in §3 — it adds a second, narrower one.
+
+### 8.1 Why a job queue, not a synchronous write
+
+Ingestion (`schema → load → embed → validate`) already takes real time at
+corpus scale (embedding is the dominant cost). A `POST` that ran this inline
+would either time out or hold an HTTP connection open for minutes — neither
+is acceptable for a request/response API. So the write path is asynchronous:
+
+```text
+Caller           KG Service (API)        MinIO         Redis/RQ        Worker process
+  |                     |                    |              |                |
+  |--POST /v1/ingest-jobs (multipart)------->|              |                |
+  |                     |--validate JSONL    |              |                |
+  |                     |--put_object------->|              |                |
+  |                     |--enqueue(run_ingest_job)---------->|                |
+  |<--202 {job_id, status}--------------------|              |                |
+  |                     |                    |              |--dequeue------>|
+  |                     |                    |<--fget_object-----------------|
+  |                     |                    |              |   apply_schema |
+  |                     |                    |              |   load_metadata|
+  |                     |                    |              |   run_embedding|
+  |                     |                    |              |   run_validation
+  |--GET /v1/ingest-jobs/{id}--------------------------------Job.fetch(id)-->|
+  |<--{status, result}--|                    |              |                |
+```
+
+- **MinIO** stages the uploaded file so the API process (validates and
+  responds immediately) and the worker process (actually reads and loads it)
+  don't need to share a filesystem — same reasoning as every stage boundary
+  in `sciagent-KG` already being a file on disk, not an in-memory hand-off
+  (see `sciagent-KG/specs/02-architecture.md` §2).
+- **Redis/RQ** is the job queue. The API process only ever calls
+  `Queue.enqueue()`; it never imports or runs the ingestion pipeline itself.
+- The **worker** (`kg_service/worker.py`, run with
+  `uv run python -m kg_service.worker`) is a separate process/container from
+  `kg_service.main:app`. It runs `kg_service/jobs.py:run_ingest_job`, which
+  calls `sciagent-KG`'s own `apply_schema` / `load_metadata` / `run_embedding`
+  / `run_validation` functions directly — the same idempotent, resumable
+  stages the CLI already runs, not a reimplementation (see
+  `sciagent-KG/specs/02-architecture.md` §2–3 for why those stages are
+  idempotent/resumable to begin with).
+
+### 8.2 Credential boundary: a second, narrower write path
+
+§3 established that this service's API process holds only read-only Neo4j
+credentials. The ingest worker is the one place in `sciagent-backend` that
+needs write access, and it is kept separate on purpose:
+
+- The worker builds its own Neo4j driver from `KG_WRITE_NEO4J_URI` /
+  `KG_WRITE_NEO4J_USERNAME` / `KG_WRITE_NEO4J_PASSWORD`
+  (`kg_service/jobs.py:_write_driver`) — env vars that `kg_service.config`
+  and `kg_service.deps` (the API process's modules) never read.
+- In deployment, only the worker container's environment is given those
+  values (`sciagent-backend/.env.worker.example`); the API container's is
+  not. The boundary is enforced by which *process* holds the secret — the
+  same mechanism that already separates `sciagent-KG`'s write credential
+  from this service's read-only one (§3), not application-code discipline
+  alone.
+- `/v1/ingest-jobs` is gated by a **separate, smaller** service-key
+  allowlist (`KG_SERVICE_WRITE_ALLOWED_KEYS`, checked by
+  `require_write_service_key` in `kg_service/auth.py`) than every read
+  endpoint's `KG_SERVICE_ALLOWED_KEYS` — a caller authorized to search papers
+  is not automatically authorized to add them.
+
+### 8.3 What the API process validates before anything is queued
+
+`kg_service/services/ingest.py` rejects a bad upload before it ever reaches
+MinIO or the worker, so a malformed file fails in the request that submitted
+it, not several minutes later inside a worker log nobody's watching:
+
+- File size over `MAX_INGEST_FILE_BYTES` (default 200MB) → `413`.
+- Not valid UTF-8, not JSONL, or any line missing the `id` field
+  `src.ingestion.transform.transform()` requires → `422
+  INGEST_FILE_INVALID_JSONL`.
+- Zero valid records → `422 INGEST_FILE_EMPTY`.
+
+### 8.4 Entity extraction is a deliberate follow-up, not automatic
+
+`/v1/ingest-jobs` only runs the ingestion pipeline (metadata + embeddings).
+It does not trigger entity extraction for the newly-added papers — matches
+the existing non-goal in `sciagent-KG/specs/01-requirements.md` §4 ("no
+automatic, unattended re-extraction on a schedule"). `papers_needing_extraction()`
+already recomputes fresh from what's on disk, so it picks up any paper
+missing entities regardless of how it was ingested — a separately-triggered
+extraction run (CLI, for now) covers papers added through this endpoint the
+same way it covers any other gap.
+
+## 9. What changes in `sciagent-KG` to support this
 
 Minimal, additive only:
 
@@ -144,15 +238,20 @@ Minimal, additive only:
   Cypher.
 - A `stats` query (paper count, entity counts by label) — trivial `MATCH ...
   RETURN count(*)` queries, net new but tiny.
-- No changes to ingestion, extraction, or the graph schema itself.
+- No changes to ingestion, extraction, or the graph schema itself — §8's
+  worker calls the existing `src/ingestion/` functions as-is.
 
-## 9. Exit criteria for this phase
+## 10. Exit criteria for this phase
 
 - Every endpoint in [`03-kg-service-api-spec.md`](03-kg-service-api-spec.md)
   maps to exactly one existing (or explicitly-flagged-new) query/class in
   `sciagent-KG`.
-- Read vs. write separation is unambiguous: this service holds only
+- Read vs. write separation is unambiguous: the API process holds only
   read-only Neo4j credentials, enforced at the database user level, not just
-  by convention in application code.
+  by convention in application code; the ingest worker's separate write
+  credential is scoped to its own process/container only (§8.2).
 - The error model and versioning scheme are fixed before implementation
   starts — changing them later is a breaking change for every caller.
+- The write path's own credential and key boundaries (§8.2) are verified by
+  a test, not just asserted in prose — mirrors the existing read-only
+  credential test in `04-kg-service-nfr-testing-deployment.md` §5.

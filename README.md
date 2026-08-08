@@ -14,9 +14,9 @@ This README covers how the pieces fit together.
 ## Architecture
 
 The system is split into an **offline data pipeline** that builds the graph
-and an **online serving path** that answers user queries against it. Every
-service only talks to its direct neighbor — nothing but `sciagent-KG` ever
-holds a Neo4j credential.
+and an **online serving path** that answers user queries against it, plus one
+narrow **write path** for adding new papers without touching the CLI. Every
+service only talks to its direct neighbor.
 
 ```mermaid
 flowchart TB
@@ -31,7 +31,7 @@ export → extract → resolve → merge"]
         EXT -->|Method / Dataset / ResearchTopic| KGDB
     end
 
-    subgraph Online["Online serving path"]
+    subgraph Online["Online serving path (read-only)"]
         direction TB
         BROWSER["Web Browser"] -->|HTTPS / SSE| FE["Frontend
 sciagent-frontend (scaffold only)"]
@@ -45,18 +45,39 @@ sciagent-backend (FastAPI) — implemented"]
 sciagent-KG"]
         RET -->|read-only credentials| KGDB
     end
+
+    subgraph Write["Ingestion write path — sciagent-backend"]
+        direction TB
+        UPLOADER["Upload caller
+(frontend / ops)"] -->|"POST /v1/ingest-jobs
+write-scoped X-Service-Key"| API
+        API -->|put_object| MINIO[("MinIO
+staged upload")]
+        API -->|enqueue| QUEUE[("Redis / RQ")]
+        QUEUE --> WORKER["Ingest worker
+kg_service.worker (separate process)"]
+        MINIO -->|fget_object| WORKER
+        WORKER -->|"schema → load → embed → validate
+(sciagent-KG's own functions, not reimplemented)"| KGDB
+    end
 ```
 
-**Credential boundary:** `sciagent-KG`'s ingestion/extraction CLIs hold the
-only *read-write* Neo4j user. `sciagent-backend` connects with a separate
-*read-only* user. `sciagent-mcp` never touches Neo4j at all — it only calls
-`sciagent-backend` over HTTP, and the agent never gets direct database
-access.
+**Credential boundary:** `sciagent-KG`'s ingestion/extraction CLIs hold a
+*read-write* Neo4j user. `sciagent-backend`'s API process connects with a
+separate *read-only* user — it can search, expand, and browse but cannot
+write. The one place besides `sciagent-KG`'s CLIs that gets write access is
+`sciagent-backend`'s ingest **worker**, a distinct process from the API with
+its own credential (`KG_WRITE_NEO4J_*`) that the API process never reads —
+see [`sciagent-backend/specs/02-kg-service-architecture.md`](sciagent-backend/specs/02-kg-service-architecture.md)
+§8. `sciagent-mcp` never touches Neo4j at all — it only calls `sciagent-backend`
+over HTTP, and the agent never gets direct database access.
 
 **Build status:** everything from `sciagent-KG` through `sciagent-mcp` is
-implemented and callable end-to-end (MCP tool → KG Service → Neo4j). The BFF
-/ Agent Orchestrator layer doesn't exist yet, and `sciagent-frontend` is a
-scaffold that talks to a mocked API, not the real one — see
+implemented and callable end-to-end (MCP tool → KG Service → Neo4j), plus the
+ingestion write path (`/v1/ingest-jobs` → MinIO/Redis → worker → Neo4j). The
+BFF / Agent Orchestrator layer doesn't exist yet, `sciagent-frontend` is a
+scaffold that talks to a mocked API rather than a real upload form, and the
+write path has unit-test coverage but no live integration test yet — see
 [Repository layout](#repository-layout) for the per-project detail.
 
 ## Repository layout
@@ -64,7 +85,7 @@ scaffold that talks to a mocked API, not the real one — see
 | Path | Role | Status |
 |---|---|---|
 | [`sciagent-KG/`](sciagent-KG) | Ingests arXiv metadata into Neo4j, computes embeddings, extracts domain entities via LLM, evaluates retrieval quality | Ingestion + extraction complete for the current corpus (36k papers, 128k+ entities) |
-| [`sciagent-backend/`](sciagent-backend) | `KG Service` — read-only FastAPI wrapper over `sciagent-KG`'s query layer, versioned under `/v1/` | All `/v1/` endpoints implemented (paper lookup, search, graph expansion, entities, stats) except `GET /v1/papers/{arxiv_id}/embedding` (`501`); Sprint 4 hardening (load test, dashboards) not started |
+| [`sciagent-backend/`](sciagent-backend) | `KG Service` — almost entirely read-only FastAPI wrapper over `sciagent-KG`'s query layer, versioned under `/v1/`, plus `/v1/ingest-jobs` to add new papers | All `/v1/` endpoints implemented (paper lookup, search, graph expansion, entities, stats, ingest-jobs) except `GET /v1/papers/{arxiv_id}/embedding` (`501`); ingest-jobs unit-tested only (no live MinIO/Redis/Neo4j integration test yet); Sprint 4 hardening (load test, dashboards) not started |
 | [`sciagent-frontend/`](sciagent-frontend) | Web app: search, paper detail + entities, corpus stats (Next.js + Tailwind) | Scaffolded; renders a plain fallback wherever the backend still returns `501` |
 | [`sciagent-mcp/`](sciagent-mcp) | Translates the KG Service's REST API into MCP tools for the agent orchestrator | Implemented — all 11 MCP tools wired to the KG Service, incl. Streamable HTTP integration tests |
 | `sciagent-devops/` | Deployment, CI/CD, infrastructure | Not started |
@@ -82,9 +103,13 @@ changes.
   everything runs as CLI commands or batch jobs. Splitting it out keeps
   expensive, slow, offline work (LLM extraction, embedding) separate from
   anything request/response.
-- **`sciagent-backend` is a thin, read-only layer.** It imports
-  `sciagent-KG`'s query classes as a library rather than re-implementing
-  Cypher, so a fix to a query is a fix for every caller.
+- **`sciagent-backend` is a thin, almost entirely read-only layer.** It
+  imports `sciagent-KG`'s query classes as a library rather than
+  re-implementing Cypher, so a fix to a query is a fix for every caller.
+  Its one write path, `/v1/ingest-jobs`, doesn't reimplement ingestion
+  either — it asynchronously re-triggers `sciagent-KG`'s own ingestion
+  functions from a separate worker process, so the API process itself stays
+  provably read-only even though the service as a whole can now add papers.
 - **`sciagent-mcp` never sees the database.** It is a pure translation layer
   (MCP tool call in, KG Service HTTP call out) so the LLM agent's only path
   to data is through an API that's already access-controlled and rate-limited.
@@ -97,6 +122,10 @@ changes.
   extraction.
 - **Service layer:** FastAPI (`sciagent-backend`), the official `mcp` SDK /
   FastMCP (`sciagent-mcp`).
+- **Ingestion write path:** MinIO (S3-compatible staging for uploaded
+  metadata files), Redis + RQ (job queue handing work off to a separate
+  worker process), Docker Compose (`docker-compose.yml` at repo root) to run
+  MinIO/Redis/the KG Service/the worker together locally.
 - **Frontend:** Next.js (App Router), TypeScript, Tailwind CSS.
 
 ## Getting started
@@ -107,6 +136,10 @@ independently:
 - Build or extend the graph: see [`sciagent-KG/README.md`](sciagent-KG/README.md)
   and the `sciagent-kg-ingest` / `sciagent-kg-extract` skills.
 - Run the KG Service API: see [`sciagent-backend/README.md`](sciagent-backend/README.md).
+- Add new papers without the CLI (`POST /v1/ingest-jobs`): see
+  [`sciagent-backend/README.md`](sciagent-backend/README.md)'s "With the
+  ingestion write path" section (needs MinIO + Redis + the ingest worker,
+  run together via the root `docker-compose.yml`).
 - Run the frontend against it: see [`sciagent-frontend/README.md`](sciagent-frontend/README.md).
 - Query the graph directly (search, author/category/year lookup, expansion):
   see the `sciagent-kg` skill.
