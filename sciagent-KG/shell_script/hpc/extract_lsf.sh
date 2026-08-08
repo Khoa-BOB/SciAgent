@@ -1,23 +1,24 @@
 #!/bin/bash
-#SBATCH --job-name=kg-extract
-#SBATCH --array=0-N%CONCURRENCY   # <-- set N = number of shards - 1, CONCURRENCY = how many array tasks run at once
-#SBATCH --gpus-per-task=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=02:00:00
-#SBATCH --output=logs/kg-extract-%A_%a.out
+#BSUB -J kg-extract[1-N]%CONCURRENCY   # <-- N = number of shards, CONCURRENCY = max concurrent tasks (LSF arrays are 1-indexed)
+#BSUB -n 4
+#BSUB -R "rusage[mem=32000]"
+#BSUB -gpu "num=1"
+#BSUB -W 02:00
+#BSUB -o logs/kg-extract-%J-%I.out
 #
-# One shard per array task: starts a local vLLM OpenAI-compatible server on
-# this node, runs src.extraction.extract against it, then shuts the server
-# down. Shards come from filtering a local copy of the arXiv snapshot by
-# the KG's current paper ids -- see run_cluster_pipeline.sh, which produces
-# the shards and submits this job with the right --array range in one step.
+# LSF (bsub) equivalent of extract_slurm.sbatch -- one shard per array task,
+# starts a local vLLM OpenAI-compatible server on this node, runs
+# src.extraction.extract against it, then shuts the server down.
+#
+# LSF array indices are 1-based (LSB_JOBINDEX), mapped here to shard index
+# LSB_JOBINDEX - 1 to match shard_0000.jsonl's 0-based naming.
 #
 # EDIT BEFORE USE -- these are cluster-specific and unknowable without your
 # site's docs:
-#   - module load / conda activate lines, if vLLM isn't installed some
-#     other way already reachable as `vllm` on PATH
-#   - --account / --partition / --qos for your cluster's scheduler
+#   - module load / conda activate lines, if vLLM isn't already on PATH
+#   - -q (queue), -P (project/account) -- most LSF sites require one or both
+#   - -gpu syntax varies a lot by site; check `bsub -gpu` / your site's docs
+#   - -R "rusage[mem=...]" units (MB vs GB) are site-config-dependent
 #
 # Prerequisite: shell_script/hpc/setup_cluster_env.sh has been run once on
 # a login node, so .venv/ exists -- this script never calls `uv run` or
@@ -25,8 +26,8 @@
 # air-gapped.
 #
 # Normally you won't invoke this directly -- run
-# shell_script/hpc/run_cluster_pipeline.sh instead, which sets --array,
-# PROJECT_DIR, and SHARDS_DIR for you.
+# shell_script/hpc/run_cluster_pipeline.sh --scheduler lsf instead, which
+# sets the array range, PROJECT_DIR, and SHARDS_DIR for you.
 
 set -euo pipefail
 
@@ -39,15 +40,17 @@ MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 CONCURRENCY="${CONCURRENCY:-16}"  # papers in flight per task -- vLLM batches these
 # server-side; raise/lower based on your GPU's memory and the model size.
 PYTHON="$PROJECT_DIR/.venv/bin/python"
-PORT=$(( 8000 + SLURM_ARRAY_TASK_ID % 1000 ))
+
+SHARD_INDEX=$(( LSB_JOBINDEX - 1 ))
+PORT=$(( 8000 + SHARD_INDEX % 1000 ))
 
 # Exclude .extracted.jsonl -- this array's own output files also match
 # shard_*.jsonl once other concurrent tasks have produced some, which
 # shifts indices and can hand a task an output file as its "input".
 mapfile -t SHARD_FILES < <(find "$SHARDS_DIR" -maxdepth 1 -name 'shard_*.jsonl' ! -name '*.extracted.jsonl' | sort)
-SHARD_PATH="${SHARD_FILES[$SLURM_ARRAY_TASK_ID]}"
+SHARD_PATH="${SHARD_FILES[$SHARD_INDEX]}"
 
-echo "Task $SLURM_ARRAY_TASK_ID: shard=$SHARD_PATH model=$MODEL port=$PORT"
+echo "Task $LSB_JOBINDEX (shard index $SHARD_INDEX): shard=$SHARD_PATH model=$MODEL port=$PORT"
 
 # Start vLLM's OpenAI-compatible server in the background on this node.
 vllm serve "$MODEL" --port "$PORT" --host 127.0.0.1 &
@@ -69,4 +72,4 @@ cd "$PROJECT_DIR"
   --model "$MODEL" \
   --concurrency "$CONCURRENCY"
 
-echo "Task $SLURM_ARRAY_TASK_ID done."
+echo "Task $LSB_JOBINDEX done."

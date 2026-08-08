@@ -8,7 +8,9 @@
 # quality cheaply before spending HPC GPU time on the full corpus.
 #
 # Prerequisites: `ollama serve` running, and the model pulled
-# (`ollama pull qwen3.5`).
+# (`ollama pull zephyr`). Avoid "thinking"/reasoning models here (e.g.
+# qwen3.5) -- they burn their context on chain-of-thought and time out
+# instead of emitting structured output.
 #
 # Usage:
 #   shell_script/extract_pipeline_local.sh            # pilot on 200 papers
@@ -24,7 +26,7 @@ LIMIT="${1:-200}"
 SHARDS_DIR="data/extraction/pilot_shards"
 RESOLVED_PATH="data/extraction/pilot_resolved.jsonl"
 OLLAMA_URL="http://localhost:11434/v1"
-MODEL="qwen3.5"
+MODEL="zephyr:latest"
 
 echo "=== Pilot run: $LIMIT papers, model=$MODEL (Ollama) ==="
 

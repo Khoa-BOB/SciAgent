@@ -10,6 +10,7 @@ from src.config import NEO4J_DATABASE, get_driver
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = Path(__file__).parents[3] / "data/extraction/shards"
+DEFAULT_IDS_PATH = Path(__file__).parents[3] / "data/extraction/kg_paper_ids.txt"
 DEFAULT_SHARD_SIZE = 1000
 
 
@@ -33,6 +34,28 @@ def export_papers(
         query, limit=limit, database_=database, routing_="r"
     )
     return [record.data() for record in records]
+
+
+def export_paper_ids(
+    driver: Driver, database: str | None, limit: int | None = None
+) -> list[str]:
+    """Just the arxiv_ids currently in the KG -- for clusters that already
+    have their own copy of the raw arXiv snapshot, this is enough to filter
+    it locally there, instead of shipping title/abstract text over the
+    network via `export_papers`.
+    """
+    query = "MATCH (p:Paper) RETURN p.arxiv_id AS arxiv_id ORDER BY p.arxiv_id" + (
+        " LIMIT $limit" if limit is not None else ""
+    )
+    records, _, _ = driver.execute_query(
+        query, limit=limit, database_=database, routing_="r"
+    )
+    return [record["arxiv_id"] for record in records]
+
+
+def write_ids(ids: list[str], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(ids) + "\n", encoding="utf-8")
 
 
 def write_shards(papers: list[dict], output_dir: Path, shard_size: int) -> list[Path]:
@@ -65,6 +88,17 @@ def parse_args() -> argparse.Namespace:
         "--limit", type=int, default=None,
         help="Only export the first N eligible papers (for a pilot run).",
     )
+    parser.add_argument(
+        "--ids-only", action="store_true",
+        help="Write just a flat list of arxiv_ids (one per line) instead of "
+        "title/abstract shards -- for clusters that already have their own "
+        "copy of the raw arXiv snapshot and can filter it locally "
+        "(see src.extraction.filter_snapshot).",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=DEFAULT_IDS_PATH,
+        help=f"Output path for --ids-only (default: {DEFAULT_IDS_PATH})",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: %(default)s)")
     return parser.parse_args()
 
@@ -75,15 +109,22 @@ def main() -> None:
 
     driver = get_driver()
     try:
-        papers = export_papers(driver, NEO4J_DATABASE, limit=args.limit)
+        if args.ids_only:
+            ids = export_paper_ids(driver, NEO4J_DATABASE, limit=args.limit)
+        else:
+            papers = export_papers(driver, NEO4J_DATABASE, limit=args.limit)
     finally:
         driver.close()
 
-    shard_paths = write_shards(papers, args.output_dir, args.shard_size)
-    logger.info(
-        "Exported %d paper(s) into %d shard(s) under %s",
-        len(papers), len(shard_paths), args.output_dir,
-    )
+    if args.ids_only:
+        write_ids(ids, args.output)
+        logger.info("Exported %d paper id(s) to %s", len(ids), args.output)
+    else:
+        shard_paths = write_shards(papers, args.output_dir, args.shard_size)
+        logger.info(
+            "Exported %d paper(s) into %d shard(s) under %s",
+            len(papers), len(shard_paths), args.output_dir,
+        )
 
 
 if __name__ == "__main__":
