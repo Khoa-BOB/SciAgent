@@ -34,12 +34,13 @@ export → extract → resolve → merge"]
     subgraph Online["Online serving path"]
         direction TB
         BROWSER["Web Browser"] -->|HTTPS / SSE| FE["Frontend
-sciagent-frontend"]
-        FE --> BFF["BFF / Agent Orchestrator"]
+sciagent-frontend (scaffold only)"]
+        FE --> BFF["BFF / Agent Orchestrator
+(not built)"]
         BFF -->|MCP over Streamable HTTP| MCP["MCP Server
-sciagent-mcp"]
+sciagent-mcp — implemented"]
         MCP -->|HTTPS + X-Service-Key| API["KG Service API
-sciagent-backend (FastAPI)"]
+sciagent-backend (FastAPI) — implemented"]
         API -->|imports as a library| RET["queries/ + src/retrieval/
 sciagent-KG"]
         RET -->|read-only credentials| KGDB
@@ -52,14 +53,20 @@ only *read-write* Neo4j user. `sciagent-backend` connects with a separate
 `sciagent-backend` over HTTP, and the agent never gets direct database
 access.
 
+**Build status:** everything from `sciagent-KG` through `sciagent-mcp` is
+implemented and callable end-to-end (MCP tool → KG Service → Neo4j). The BFF
+/ Agent Orchestrator layer doesn't exist yet, and `sciagent-frontend` is a
+scaffold that talks to a mocked API, not the real one — see
+[Repository layout](#repository-layout) for the per-project detail.
+
 ## Repository layout
 
 | Path | Role | Status |
 |---|---|---|
 | [`sciagent-KG/`](sciagent-KG) | Ingests arXiv metadata into Neo4j, computes embeddings, extracts domain entities via LLM, evaluates retrieval quality | Ingestion + extraction complete for the current corpus (36k papers, 128k+ entities) |
-| [`sciagent-backend/`](sciagent-backend) | `KG Service` — read-only FastAPI wrapper over `sciagent-KG`'s query layer, versioned under `/v1/` | Scaffolding — health checks, auth, and paper lookup are live; search/graph/entities endpoints are stubbed (`501`) |
+| [`sciagent-backend/`](sciagent-backend) | `KG Service` — read-only FastAPI wrapper over `sciagent-KG`'s query layer, versioned under `/v1/` | All `/v1/` endpoints implemented (paper lookup, search, graph expansion, entities, stats) except `GET /v1/papers/{arxiv_id}/embedding` (`501`); Sprint 4 hardening (load test, dashboards) not started |
 | [`sciagent-frontend/`](sciagent-frontend) | Web app: search, paper detail + entities, corpus stats (Next.js + Tailwind) | Scaffolded; renders a plain fallback wherever the backend still returns `501` |
-| [`sciagent-mcp/`](sciagent-mcp) | Translates the KG Service's REST API into MCP tools for the agent orchestrator | Spec complete; implementation not started |
+| [`sciagent-mcp/`](sciagent-mcp) | Translates the KG Service's REST API into MCP tools for the agent orchestrator | Implemented — all 11 MCP tools wired to the KG Service, incl. Streamable HTTP integration tests |
 | `sciagent-devops/` | Deployment, CI/CD, infrastructure | Not started |
 | [`spec/`](spec) | Product-level spec: user stories, API/SSE contracts, NFRs, SDLC | Reference document |
 | [`analysis/`](analysis), `data/`, `results/` | Notebooks, raw/sampled arXiv snapshots, and benchmark output used while building the pipeline | — |
