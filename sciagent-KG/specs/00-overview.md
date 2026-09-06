@@ -38,6 +38,9 @@ reference docs and are linked from here rather than duplicated:
   catalog for the metadata graph
 - [`../docs/entity_extraction_pipeline.md`](../docs/entity_extraction_pipeline.md) — stage-by-stage
   detail for export → extract → resolve → merge
+- [`../docs/retrieval_architecture.md`](../docs/retrieval_architecture.md) — how
+  `src/retrieval/` answers queries against the graph, and which parts are
+  `neo4j-graphrag-python` retrievers vs. hand-written Cypher
 
 Treat `docs/` as the "what the data looks like and how it's produced"
 reference, and `specs/` as the "why it's built this way, what's required of
