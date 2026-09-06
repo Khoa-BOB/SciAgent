@@ -1,6 +1,10 @@
 import argparse
 
+from src.extraction.extract import DEFAULT_BASE_URL, DEFAULT_MODEL
+from src.extraction.llm_client import resolve_api_key
 from src.retrieval.graph_expand import ExpandedResult, GraphExpander
+from src.retrieval.hybrid_search import PaperHybridSearch
+from src.retrieval.nl_query import NLGraphQuery, build_default_llm
 from src.retrieval.search import PaperSearch, PaperSummary
 from src.retrieval.vector_search import PaperVectorSearch
 
@@ -177,6 +181,41 @@ def cmd_fulltext(args: argparse.Namespace) -> None:
         search.close()
 
 
+def cmd_hybrid(args: argparse.Namespace) -> None:
+    search = PaperHybridSearch()
+    try:
+        results = search.search(args.query, top_k=args.top_k)
+        summaries = [
+            PaperSummary(
+                paper_id=r.paper_id, title=r.title, abstract=r.abstract, score=r.score
+            )
+            for r in results
+        ]
+        _print_summaries(summaries, f"Hybrid (vector + fulltext) matches for {args.query!r}")
+    finally:
+        search.close()
+
+
+def cmd_nl_query(args: argparse.Namespace) -> None:
+    llm = build_default_llm(
+        base_url=args.base_url,
+        model=args.model,
+        api_key=resolve_api_key(args.api_key, args.base_url),
+    )
+    nl_query = NLGraphQuery(llm=llm)
+    try:
+        result = nl_query.query(args.question)
+        print(f"\nGenerated Cypher:\n  {result.metadata.get('cypher')}\n")
+        if not result.items:
+            print("No results.")
+            return
+        print(f"=== Results ({len(result.items)}) ===")
+        for position, item in enumerate(result.items, start=1):
+            print(f"{position}. {item.content}")
+    finally:
+        nl_query.close()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Search SciAgent papers.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -256,6 +295,37 @@ def parse_args() -> argparse.Namespace:
         "--limit", type=int, default=10, help="Max papers to return"
     )
 
+    hybrid_parser = subparsers.add_parser(
+        "hybrid", help="Combined vector + fulltext search."
+    )
+    hybrid_parser.add_argument("query", help="Natural-language or keyword query")
+    hybrid_parser.add_argument(
+        "--top-k", type=int, default=5, help="Number of papers to retrieve"
+    )
+
+    nl_query_parser = subparsers.add_parser(
+        "nl-query",
+        help="Natural-language graph query, converted to read-only Cypher by an LLM.",
+    )
+    nl_query_parser.add_argument("question", help="Natural-language question about the graph")
+    nl_query_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help="OpenAI-compatible API base URL (default: %(default)s, i.e. local Ollama)",
+    )
+    nl_query_parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model name as served by the backend (default: %(default)s)",
+    )
+    nl_query_parser.add_argument(
+        "--api-key",
+        default=None,
+        help="API key. Defaults to OPENAI_API_KEY in sciagent-KG/.env when --base-url "
+        "points at api.openai.com; avoid passing a real key here directly (visible in "
+        "`ps`/process listings).",
+    )
+
     return parser.parse_args()
 
 
@@ -266,6 +336,8 @@ COMMANDS = {
     "by-category": cmd_by_category,
     "by-year": cmd_by_year,
     "fulltext": cmd_fulltext,
+    "hybrid": cmd_hybrid,
+    "nl-query": cmd_nl_query,
 }
 
 
