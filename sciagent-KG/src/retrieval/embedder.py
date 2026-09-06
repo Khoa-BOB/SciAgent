@@ -5,6 +5,19 @@ without depending on neo4j-graphrag's own `[sentence-transformers]` extra
 >=5.6.1 this project needs for the embeddinggemma-300m model.
 """
 
+import os
+
+# Skip huggingface_hub's "is my cached model still current" network round
+# trips (~10 HEAD requests, ~3s) on every retrieval CLI invocation. Safe to
+# default on here specifically: retrieval only ever runs after ingestion's
+# embed stage or extraction's resolve stage has already downloaded this
+# exact model to build the embeddings already sitting in Neo4j, so there's
+# no first-download case this could break. setdefault so an operator can
+# still force online checks (e.g. after bumping MODEL_NAME) by setting
+# HF_HUB_OFFLINE=0 themselves. Must run before sentence_transformers is
+# imported, since huggingface_hub reads this at import time.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 from neo4j_graphrag.embeddings.base import Embedder
 from sentence_transformers import SentenceTransformer
 
